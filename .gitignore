@@ -2,7 +2,6 @@
 .graph_tokens.json
 
 # Env with secrets
-.env
 .env.local
 
 # Python
