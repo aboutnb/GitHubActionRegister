@@ -67,6 +67,27 @@ _auth_done = threading.Event()
 # 同进程内复用 access_token，避免多次 refresh 导致 401（如先 list_messages 再 get_message 再 /me）
 _cached_access_token: Optional[str] = None
 
+# 可由上层（如 github_register_ui）注册一个回调，将 OAuth 授权 URL 在指定浏览器中打开
+_auth_url_opener: Optional[callable] = None
+
+
+def register_auth_url_opener(func: callable) -> None:
+    """
+    注册一个用于打开 OAuth 授权 URL 的回调。
+    若未注册，则默认使用系统浏览器 webbrowser.open。
+
+    典型用法：在 GitHub 注册流程中，将 Graph 授权页在 Bitbrowser 指纹浏览器里打开：
+
+        from getmail import register_auth_url_opener
+
+        def _open_in_ws(url: str) -> None:
+            ...  # 用 playwright + CDP 在现有页面中 goto(url)
+
+        register_auth_url_opener(_open_in_ws)
+    """
+    global _auth_url_opener
+    _auth_url_opener = func
+
 
 # ---------------------------------------------------------------------------
 # OAuth 回调 HTTP 处理
@@ -116,8 +137,9 @@ def _load_tokens() -> Optional[dict[str, Any]]:
         return None
 
 
-# token 文件只存 refresh_token / access_token / expires_in / tenant_id，不存 client_id / client_secret（来自 .env.local）
-_TOKEN_KEYS = frozenset({"refresh_token", "access_token", "expires_in", "tenant_id"})
+# token 文件只存 refresh_token / access_token / expires_in / tenant_id / client_id，
+# 不存 client_secret（来自 .env.local）
+_TOKEN_KEYS = frozenset({"refresh_token", "access_token", "expires_in", "tenant_id", "client_id"})
 
 
 def _save_tokens(data: dict[str, Any]) -> None:
@@ -137,14 +159,19 @@ def _save_tokens(data: dict[str, Any]) -> None:
 def set_current_account(
     refresh_token: str,
     tenant_id: Optional[str] = None,
+    client_id: Optional[str] = None,
 ) -> None:
     """
     将指定 refresh_token 设为当前取信账号（写入本地 token 文件）。
-    client_id / client_secret 只用 .env.local 里的 GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET，不写入 token 文件。
+    client_secret 只用 .env.local 里的 GRAPH_CLIENT_SECRET，不写入 token 文件。
+    client_id 可通过此函数传入并写入 token 文件，用于覆盖默认的 GRAPH_CLIENT_ID，
+    便于一台机器上针对不同邮箱使用不同的 Entra 应用。
     """
     payload: dict[str, Any] = {"refresh_token": refresh_token, "access_token": None, "expires_in": None}
     if tenant_id:
         payload["tenant_id"] = tenant_id
+    if client_id:
+        payload["client_id"] = client_id
     _save_tokens(payload)
 
 
@@ -253,8 +280,10 @@ def get_access_token() -> str:
     优先用本地缓存的 refresh_token 刷新；若无则启动本地服务，打开浏览器让用户登录一次，再交换 code。
     """
     saved = _load_tokens() or {}
-    # client_id / client_secret 只用 .env.local，tokens.json 里不存、不读（邮箱格式里的那串 UUID 不是 OAuth 应用 client_id）
-    client_id = GRAPH_CLIENT_ID
+    # client_secret 只用 .env.local，tokens.json 里不存、不读。
+    # client_id 优先使用 token 文件中持久化的 client_id（来自 UI 粘贴行的第3段），
+    # 若不存在则退回 .env.local 中的 GRAPH_CLIENT_ID。
+    client_id = saved.get("client_id") or GRAPH_CLIENT_ID
     tenant_id = saved.get("tenant_id") or GRAPH_TENANT_ID
     client_secret = GRAPH_CLIENT_SECRET
 
@@ -295,7 +324,15 @@ def get_access_token() -> str:
     print("若浏览器未自动打开，可复制下面完整 URL 手动打开：")
     print(url)
     print()
-    webbrowser.open(url)
+    # 若上层注册了自定义打开函数（例如在 Bitbrowser 指纹浏览器中打开），优先使用
+    if _auth_url_opener:
+        try:
+            _auth_url_opener(url)
+        except Exception as e:
+            print(f"自定义授权页打开函数出错，将退回系统浏览器: {e}")
+            webbrowser.open(url)
+    else:
+        webbrowser.open(url)
 
     for i in range(OAUTH_WAIT_MAX_STEPS):
         _auth_done.wait(timeout=OAUTH_WAIT_STEP_SEC)
@@ -410,6 +447,16 @@ HREF_URL_RE = re.compile(r'href\s*=\s*["\']?(https?://[^\s"\'<>]+)["\']?', re.IG
 # URL 尾随标点（从提取结果末尾剥掉，避免打开链接 404）
 URL_TRAILING_PUNCTUATION = ".,;:!?)\"'"
 
+# GitHub 启动码（launch code）匹配：典型邮件为：
+#   "Here's your GitHub launch code! ... Continue signing up for GitHub by entering the code below: 38347135"
+# 仅在来自 *@github.com 且正文/摘要中含 launch code / code below 等关键字时，提取 6–8 位纯数字。
+LAUNCH_CODE_KEYWORDS = (
+    "launch code",
+    "code below",
+    "your github launch code",
+)
+LAUNCH_CODE_RE = re.compile(r"\b(\d{6,8})\b")
+
 
 def _normalize_text_for_url_extract(text: str) -> str:
     """去掉换行等，便于匹配被 HTML 折行拆开的同一 URL（不删空格，避免合并两条 URL）。"""
@@ -419,6 +466,22 @@ def _normalize_text_for_url_extract(text: str) -> str:
 def _strip_trailing_punctuation(url: str) -> str:
     """去掉 URL 末尾常见标点，避免浏览器打开失败。"""
     return url.rstrip(URL_TRAILING_PUNCTUATION)
+
+
+def _extract_launch_code(text: str) -> Optional[str]:
+    """
+    从文本中提取 GitHub 启动码（6–8 位数字）。
+    仅在包含 launch code 相关关键词时才尝试，避免误把时间戳等当成验证码。
+    """
+    t = (text or "").lower()
+    if not any(k in t for k in LAUNCH_CODE_KEYWORDS):
+        return None
+    # 在原始大小写文本中找数字，避免 lower() 影响
+    for m in LAUNCH_CODE_RE.finditer(text or ""):
+        code = m.group(1)
+        if code and code.isdigit():
+            return code
+    return None
 
 
 def _is_single_verification_url(url: str) -> bool:
@@ -485,6 +548,67 @@ def get_verification_link_from_inbox(
         diag = f"当前取信邮箱: {current_email or '(无法获取)'}；收件箱已扫描 {total} 封，其中来自/含 github 的 0 封。请确认注册时填写的邮箱是否为此邮箱。"
     else:
         diag = f"当前取信邮箱: {current_email or '(无法获取)'}；收件箱已扫描 {total} 封，其中来自/含 github 的 {matched} 封，但未从中解析出验证链接（可能邮件格式或链接位置不同）。"
+    return None, None, diag
+
+
+def get_verification_code_from_inbox(
+    keyword: str = "github",
+    top: int = 25,
+) -> tuple[Optional[str], Optional[dict[str, Any]], Optional[str]]:
+    """
+    从收件箱中查找 GitHub 注册邮件中的「launch code」验证码（如 38347135）。
+    典型邮件结构：
+
+        Here's your GitHub launch code!
+        Continue signing up for GitHub by entering the code below:
+        38347135
+
+    :return: (code, mail_item, diagnostic)。找到 code 时 diagnostic 为 None；
+             未找到时 diagnostic 为说明文字，便于排查是否用错邮箱或提取失败。
+    """
+    data = list_messages(
+        top=top,
+        folder="inbox",
+        select="id,subject,bodyPreview,sender",
+        order_by="receivedDateTime desc",
+    )
+    messages = data.get("value") or []
+    total = len(messages)
+    matched = 0
+    for m in messages:
+        subject = (m.get("subject") or "").lower()
+        preview = (m.get("bodyPreview") or "").lower()
+        sender = ((m.get("sender") or {}).get("emailAddress") or {}).get("address") or ""
+        sender = sender.lower()
+        if not (
+            keyword.lower() in subject
+            or keyword.lower() in preview
+            or "github.com" in sender
+        ):
+            continue
+        matched += 1
+
+        # 先从 bodyPreview 中尝试提取
+        code = _extract_launch_code(m.get("bodyPreview") or "")
+        if code:
+            return code, m, None
+
+        # 若失败，再拉取完整正文（HTML/文本均可），拼接预览一并搜索
+        try:
+            full = get_message(m["id"])
+            body = (full.get("body") or {}).get("content") or ""
+            combined = (m.get("bodyPreview") or "") + "\n" + body
+            code = _extract_launch_code(combined)
+            if code:
+                return code, full, None
+        except Exception:
+            pass
+
+    current_email = get_current_account_email()
+    if matched == 0:
+        diag = f"当前取信邮箱: {current_email or '(无法获取)'}；收件箱已扫描 {total} 封，其中来自/含 github 的 0 封。请确认注册时填写的邮箱是否为此邮箱。"
+    else:
+        diag = f"当前取信邮箱: {current_email or '(无法获取)'}；收件箱已扫描 {total} 封，其中来自/含 github 的 {matched} 封，但未从中解析出 GitHub 启动码（launch code）。"
     return None, None, diag
 
 

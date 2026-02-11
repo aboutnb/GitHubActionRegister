@@ -11,8 +11,13 @@ from tkinter import ttk, scrolledtext, messagebox
 from typing import Optional, Tuple
 
 import getmail  # noqa: F401  # 先加载 .env
-from bitbrower import create_github_ready_browser, open_browser
-from getmail import set_current_account, get_verification_link_from_inbox
+from bitbrower import create_github_ready_browser, open_browser, get_browser_detail
+from getmail import (
+    set_current_account,
+    get_verification_link_from_inbox,
+    get_verification_code_from_inbox,
+    register_auth_url_opener,
+)
 
 # ---------------------------------------------------------------------------
 # 常量（与 ui.py 一致）
@@ -36,7 +41,7 @@ FONT_HINT = ("", 8)
 
 
 def _parse_mail_line(line: str) -> Optional[Tuple[str, str, str, str]]:
-    """解析单行 邮箱----密码----第3段----refresh_token（4 段 ---- 分隔），返回四元组或 None。第3段为邮箱相关标识，程序不使用。"""
+    """解析单行 邮箱----密码----客户端ID----refresh_token（4 段 ---- 分隔），返回四元组或 None。"""
     line = line.strip()
     if not line:
         return None
@@ -78,6 +83,42 @@ def _profile_name_from_email(email: str) -> str:
     return "github-reg-" + email.replace("@", "-")[:20]
 
 
+def _ensure_browser_connected(
+    profile_id: str,
+    current_ws: str,
+    log_queue: queue.Queue,
+) -> Optional[str]:
+    """
+    确保浏览器连接可用。若当前 CDP WebSocket 连接失败，尝试重新打开浏览器并返回新的 WebSocket URL。
+    成功返回 WebSocket URL，失败返回 None。
+    """
+    # 先尝试用当前 WebSocket 连接测试
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(current_ws)
+            # 如果能连接成功，返回当前 URL
+            if browser and browser.contexts:
+                return current_ws
+    except Exception:
+        # 连接失败，尝试重新打开浏览器
+        pass
+
+    # 重新打开浏览器
+    try:
+        log_queue.put("浏览器连接已断开，正在重新打开浏览器...")
+        open_result = open_browser(profile_id)
+        new_ws = _cdp_ws_from_open_result(open_result)
+        if new_ws:
+            log_queue.put(f"浏览器已重新打开，新的 CDP 地址: {new_ws}")
+            return new_ws
+    except Exception as e:
+        log_queue.put(f"重新打开浏览器失败: {e}")
+        return None
+
+    return None
+
+
 def run_ui() -> None:
     """启动 GitHub 注册流程图形界面。"""
     root = tk.Tk()
@@ -111,12 +152,14 @@ def run_ui() -> None:
             messagebox.showwarning(
                 "提示",
                 "请粘贴完整格式的邮箱账号行（4 段用 ---- 分隔）：\n"
-                "邮箱----密码----第3段----refresh_token\n"
+                "邮箱----密码----客户端ID----refresh_token\n"
                 "注册与收取验证码均使用此账号。",
             )
             return
-        email, base_password, _third, refresh_token = parsed  # 第三段是邮箱相关标识，OAuth 的 client_id 用 .env.local 的 GRAPH_CLIENT_ID
-        set_current_account(refresh_token)
+        # 第三段为 Outlook/Hotmail 所使用的 Microsoft Entra 应用 client_id，
+        # 用于覆盖 .env.local 中的 GRAPH_CLIENT_ID，支持一机多应用。
+        email, base_password, client_id, refresh_token = parsed
+        set_current_account(refresh_token, client_id=client_id)
         parsed_account["email"] = email
         parsed_account["base_password"] = base_password
         final_password = base_password + PASSWORD_SUFFIX
@@ -141,6 +184,22 @@ def run_ui() -> None:
                 ws = _cdp_ws_from_open_result(open_result)
                 root.after(0, lambda: cdp_ws_var.set(ws))
                 log_queue.put("2. 浏览器已打开，开始自动化注册流程...")
+
+                # 注册 Graph 授权 URL 打开方式：在当前 Bitbrowser 窗口中打开，
+                # 避免在本机默认浏览器里用错账号授权成你自己的邮箱。
+                def _open_graph_auth_in_current_browser(auth_url: str) -> None:
+                    try:
+                        from playwright.sync_api import sync_playwright
+                        with sync_playwright() as p:
+                            browser = p.chromium.connect_over_cdp(ws)
+                            context = browser.contexts[0] if browser.contexts else browser.new_context()
+                            page = context.pages[0] if context.pages else context.new_page()
+                            page.goto(auth_url, timeout=CDP_GOTO_NO_TIMEOUT)
+                    except Exception as exc:
+                        # 失败时不抛给上层，让 getmail 回退到系统浏览器
+                        log_queue.put(f"在指纹浏览器中打开 Graph 授权页失败，将回退系统浏览器: {exc}")
+
+                register_auth_url_opener(_open_graph_auth_in_current_browser)
                 from github_automation import run_signup_flow
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -158,10 +217,11 @@ def run_ui() -> None:
 
     def do_next_verify() -> None:
         ws = cdp_ws_var.get()
-        if not ws:
+        profile_id = profile_id_var.get()
+        if not ws or not profile_id:
             messagebox.showinfo("提示", "请先点击 Start 完成注册步骤")
             return
-        log_area.insert(tk.END, "正在从邮箱获取 GitHub 验证链接...\n")
+        log_area.insert(tk.END, "正在从邮箱获取 GitHub 验证信息（链接或验证码）...\n")
         try:
             link, _, diag = get_verification_link_from_inbox(keyword=VERIFICATION_KEYWORD, top=VERIFICATION_TOP)
             if link:
@@ -169,23 +229,54 @@ def run_ui() -> None:
                 result_area.delete("1.0", tk.END)
                 result_area.insert(tk.END, f"请在此浏览器中打开链接完成验证:\n{link}\n")
                 try:
-                    from playwright.sync_api import sync_playwright
-                    with sync_playwright() as p:
-                        browser = p.chromium.connect_over_cdp(ws)
-                        if browser.contexts and browser.contexts[0].pages:
-                            browser.contexts[0].pages[0].goto(link, timeout=CDP_GOTO_NO_TIMEOUT)
-                except Exception:
-                    pass
+                    # 确保浏览器连接可用（使用临时队列收集日志，然后插入到 log_area）
+                    temp_queue = queue.Queue()
+                    active_ws = _ensure_browser_connected(profile_id, ws, temp_queue)
+                    # 将临时队列中的日志移到 log_area
+                    while True:
+                        try:
+                            msg = temp_queue.get_nowait()
+                            if msg:
+                                log_area.insert(tk.END, msg + "\n")
+                        except queue.Empty:
+                            break
+                    if active_ws:
+                        if active_ws != ws:
+                            root.after(0, lambda: cdp_ws_var.set(active_ws))
+                        from playwright.sync_api import sync_playwright
+                        with sync_playwright() as p:
+                            browser = p.chromium.connect_over_cdp(active_ws)
+                            if browser.contexts and browser.contexts[0].pages:
+                                browser.contexts[0].pages[0].goto(link, timeout=CDP_GOTO_NO_TIMEOUT)
+                except Exception as e:
+                    log_area.insert(tk.END, f"在浏览器中打开链接失败: {e}\n")
             else:
-                log_area.insert(tk.END, (diag or "未在收件箱中找到 GitHub 验证邮件。") + "\n")
+                # 若未解析到链接，再尝试解析 GitHub 启动码（launch code）
+                code, _, diag_code = get_verification_code_from_inbox(
+                    keyword=VERIFICATION_KEYWORD,
+                    top=VERIFICATION_TOP,
+                )
+                if code:
+                    log_area.insert(tk.END, f"已从邮箱获取 GitHub 验证码（launch code）: {code}\n")
+                    result_area.delete("1.0", tk.END)
+                    result_area.insert(
+                        tk.END,
+                        f"请在 GitHub 注册页面输入以下验证码完成验证（GitHub launch code）:\n{code}\n",
+                    )
+                else:
+                    log_area.insert(
+                        tk.END,
+                        (diag_code or diag or "未在收件箱中找到 GitHub 验证邮件或验证码。") + "\n",
+                    )
         except Exception as e:
             log_area.insert(tk.END, f"取件错误: {e}\n")
         log_area.see(tk.END)
 
     def do_enable_2fa() -> None:
         ws = cdp_ws_var.get()
-        if not ws:
-            messagebox.showinfo("提示", "请先完成上一步并在浏览器中完成邮箱验证")
+        profile_id = profile_id_var.get()
+        if not ws or not profile_id:
+            messagebox.showinfo("提示", "请先点击 Start 完成注册步骤")
             return
         email = parsed_account.get("email") or ""
         base = parsed_account.get("base_password") or ""
@@ -194,11 +285,21 @@ def run_ui() -> None:
             return
 
         def run() -> None:
+            # 确保浏览器连接可用，若断开则重新打开
+            active_ws = _ensure_browser_connected(profile_id, ws, log_queue)
+            if not active_ws:
+                log_queue.put("无法连接到浏览器，请确认浏览器窗口是否已关闭。若已关闭，请重新点击 Start。")
+                return
+
+            # 如果重新打开了浏览器，更新 UI 中保存的 WebSocket URL
+            if active_ws != ws:
+                root.after(0, lambda: cdp_ws_var.set(active_ws))
+
             from github_automation import run_enable_2fa_and_get_secret
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             secret = loop.run_until_complete(
-                run_enable_2fa_and_get_secret(ws, log_callback=log_queue.put)
+                run_enable_2fa_and_get_secret(active_ws, log_callback=log_queue.put)
             )
             if secret:
                 final_pw = base + PASSWORD_SUFFIX
@@ -215,14 +316,14 @@ def run_ui() -> None:
     # ---------- 布局 ----------
     f_input = ttk.LabelFrame(root, text="注册信息（只填一行，注册与收验证均用此账号）", padding=8)
     f_input.pack(fill=tk.X, padx=8, pady=6)
-    ttk.Label(f_input, text="粘贴完整格式的邮箱账号行\n格式: 邮箱----密码----第3段----refresh_token").pack(
+    ttk.Label(f_input, text="粘贴完整格式的邮箱账号行\n格式: 邮箱----密码----客户端ID----refresh_token").pack(
         anchor=tk.W, pady=(0, 4)
     )
     account_text = scrolledtext.ScrolledText(f_input, height=8, font=FONT_CONSOLE, wrap=tk.WORD)
     account_text.pack(fill=tk.X, pady=4)
     ttk.Label(
         f_input,
-        text="例: jiache1973@outlook.com----rkov9502----dbc8e03a-xxx----M.C541_SN1.0.U.-CgYr9X...（4 段用 ---- 分隔）",
+        text="例: jiache1973@outlook.com----rkov9502----dbc8e03a-xxxx-客户端ID----M.C541_SN1.0.U.-CgYr9X...（4 段用 ---- 分隔）",
         font=FONT_HINT,
         foreground="gray",
     ).pack(anchor=tk.W, pady=(0, 0))

@@ -18,7 +18,10 @@ from bitbrower import (
     create_github_ready_browser,
     open_browser,
 )
-from getmail import get_verification_link_from_inbox
+from getmail import (
+    get_verification_link_from_inbox,
+    get_verification_code_from_inbox,
+)
 
 # ---------------------------------------------------------------------------
 # 默认配置
@@ -84,14 +87,21 @@ def _step_poll_verification_link(
     keyword: str = VERIFICATION_KEYWORD,
     top: int = VERIFICATION_MAIL_TOP,
 ) -> Optional[str]:
-    """用 Graph 轮询收件箱取 GitHub 验证链接。成功返回链接，未找到或异常返回 None（异常会打印）。"""
-    print("5. 轮询邮箱（Graph）查找 GitHub 验证链接...")
+    """用 Graph 轮询收件箱取 GitHub 验证链接或验证码。成功返回链接/验证码字符串，未找到或异常返回 None（异常会打印）。"""
+    print("5. 轮询邮箱（Graph）查找 GitHub 验证链接或验证码...")
     try:
         link, _, diag = get_verification_link_from_inbox(keyword=keyword, top=top)
         if link:
             print(f"   找到验证链接: {link}")
             return link
-        print(f"   {diag or '未在最近邮件中找到'}，可稍后运行 python main.py -m 再次轮询。")
+
+        # 若未解析到链接，再尝试解析 GitHub 启动码（launch code）
+        code, _, diag_code = get_verification_code_from_inbox(keyword=keyword, top=top)
+        if code:
+            print(f"   找到 GitHub 验证码（launch code）: {code}")
+            return code
+
+        print(f"   {diag_code or diag or '未在最近邮件中找到'}，可稍后运行 python main.py -m 再次轮询。")
         return None
     except Exception as e:
         print(f"   取件出错: {e}")
@@ -149,11 +159,14 @@ def run_mail_only(
     top: int = VERIFICATION_MAIL_TOP,
 ) -> Optional[str]:
     """
-    仅轮询邮箱取 GitHub 验证链接（供命令行 -m 或脚本调用）。
-    成功返回链接，未找到返回 None，异常时抛出。
+    仅轮询邮箱取 GitHub 验证信息（验证链接或 launch code 验证码），供脚本调用。
+    优先返回验证链接，若无链接则返回验证码；未找到返回 None，异常时抛出。
     """
     link, _, _ = get_verification_link_from_inbox(keyword=keyword, top=top)
-    return link
+    if link:
+        return link
+    code, _, _ = get_verification_code_from_inbox(keyword=keyword, top=top)
+    return code
 
 
 def run_ui() -> None:
@@ -214,6 +227,7 @@ def main() -> int:
 
     if args.mail_only:
         try:
+            # 命令行模式下优先打印验证链接，其次打印 GitHub 验证码（launch code）
             link, _, diag = get_verification_link_from_inbox(
                 keyword=VERIFICATION_KEYWORD,
                 top=VERIFICATION_MAIL_TOP,
@@ -221,7 +235,14 @@ def main() -> int:
             if link:
                 print("验证链接:", link)
             else:
-                print(diag or "未找到包含 github 的验证邮件。")
+                code, _, diag_code = get_verification_code_from_inbox(
+                    keyword=VERIFICATION_KEYWORD,
+                    top=VERIFICATION_MAIL_TOP,
+                )
+                if code:
+                    print("GitHub 验证码（launch code）:", code)
+                else:
+                    print(diag_code or diag or "未找到包含 github 的验证邮件或验证码。")
             return 0
         except Exception as e:
             print("Error:", e, file=sys.stderr)

@@ -27,7 +27,6 @@ SHORT_TIMEOUT = 3000            # 可选控件短超时
 URL_GITHUB = "https://github.com"
 URL_GITHUB_SIGNUP = "https://github.com/signup"
 URL_GITHUB_SECURITY = "https://github.com/settings/security"
-URL_GITHUB_2FA_SETUP = "https://github.com/settings/two_factor_authentication/setup"
 
 # 选择器（集中维护，便于应对 GitHub 前端变更）
 SEL_EMAIL = 'input[id="email"], input[name="user[email]"], input[type="email"]'
@@ -354,11 +353,14 @@ async def run_enable_2fa_and_get_secret(
             )
             if enable_btn:
                 await enable_btn.click()
-                await asyncio.sleep(1)
-            await page.goto(URL_GITHUB_2FA_SETUP, wait_until=NAV_WAIT_UNTIL, timeout=NAV_NO_TIMEOUT)
-            await page.wait_for_load_state(LOAD_STATE_THEN, timeout=NAV_NO_TIMEOUT)
-            await asyncio.sleep(1.5)
+                await asyncio.sleep(1.5)
+            else:
+                # 新 UI 下按钮文案可能变化，或用户已在 2FA 页面上；
+                # 此时不再强行跳 URL，由用户在浏览器中自行导航到 2FA 设置页。
+                log("未找到 \"Enable two-factor\" 按钮，请在浏览器中手动进入 2FA 设置页后再次点击 UI 中的「开启 2FA 并获取密钥」。")
 
+            # 不再强制跳转 /setup 或 /two_factor_authentication，直接在当前页面解析，
+            # 以避免 GitHub 将 /setup/intro 等路径返回 404。
             content = await page.content()
             secret = _extract_otp_secret_from_page(content)
             if secret:
