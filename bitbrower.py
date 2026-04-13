@@ -1,40 +1,75 @@
 """
-Bitbrowser 本地 API 封装：创建/打开/关闭浏览器窗口，代理使用 Starry 配置。
-为 GitHub 等严格风控场景提供高仿真指纹配置，避免时区/语言/WebRTC 等破绽。
+BitBrowser 本地 API：创建档案、打开/关闭窗口。
+
+针对「GitHub 注册 + OctoCaptcha / Arkose」的约定（本文件即默认最优组合）：
+
+- **指纹与出口 IP 一致**：isIpCreateTimeZone / isIpCreatePosition / isIpCreateLanguage + ip-api，
+  避免时区、语言、地理位置与代理 IP 不符。
+- **验证码资源**：abortImage / abortMedia 关闭、disableGpu 关闭，保证拼图/脚本正常拉取；
+  doNotTrack=「1」关闭 DNT，减少 Arkose 侧异常。
+- **WebRTC**：「0」走代理出口，降低真实 IP 泄露。
+- **一账号一档案**：启动前不清 Cookie/缓存/历史，避免人机验证会话断裂。
+- **窗口启动参数**：压制首启弹窗、禁用扩展；不启用过激进的网络/站点隔离类开关，以免干扰 iframe 与 CDN。
+- **扩展**：默认 loadExtensions=false，减少 chrome-extension 注入痕迹。
+
+代理仍由 proxy_config / .env 提供；官方连通性说明：
+https://docs.github.com/zh/get-started/using-github/troubleshooting-connectivity-problems
 """
 from __future__ import annotations
 
 import os
-import warnings
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
-from starry import get_default_proxy_config, get_proxy_ip_info
+from proxy_config import to_bitbrowser_proxy
 
 # ---------------------------------------------------------------------------
-# 配置常量
+# 环境变量（仅保留确有必要的开关）
 # ---------------------------------------------------------------------------
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = (os.environ.get(name, "") or "").strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+# 为 true 时打开窗口会加载扩展；GitHub 注册场景建议保持 false
+BITBROWSER_LOAD_EXTENSIONS = _env_bool("BITBROWSER_LOAD_EXTENSIONS", False)
 
 BITBROWSER_BASE_URL = os.environ.get("BITBROWSER_BASE_URL", "http://127.0.0.1:54345")
 BITBROWSER_API_KEY = os.environ.get("BITBROWSER_API_KEY", "ce09d101554e4383818d2da198c8f8fd")
 
 API_TIMEOUT = 30
 
+# ---------------------------------------------------------------------------
+# GitHub 注册：打开窗口时的 Chromium 启动参数（POST /browser/open → args）
+# ---------------------------------------------------------------------------
 
-def _starry_to_bitbrowser_proxy(
+GITHUB_REGISTER_LAUNCH_ARGS: list[str] = [
+    # 首启：减少「设为默认浏览器」等打断
+    "--no-first-run",
+    "--no-default-browser-check",
+    # Linux/部分环境共享内存不足时的稳定性
+    "--disable-dev-shm-usage",
+    # 扩展会改请求头、注入脚本，易触发风控或拦验证码
+    "--disable-extensions",
+    "--disable-component-extensions-with-background-pages",
+    # 减少无关后台与账号体系弹窗（不碰 background-networking，以免影响 CDN/挑战资源）
+    "--disable-default-apps",
+    "--disable-sync",
+]
+
+
+def _to_bitbrowser_proxy(
     proxy_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """将 Starry 代理配置转为 Bitbrowser API 所需字段。"""
-    config = proxy_config or get_default_proxy_config()
-    return {
-        "proxyMethod": 2,
-        "proxyType": "http",
-        "host": config["proxyHost"],
-        "port": int(config["proxyPort"]),
-        "proxyUserName": config["proxyUser"],
-        "proxyPassword": config["proxyPass"],
-    }
+    """将通用代理配置转为 Bitbrowser API 所需字段。"""
+    return to_bitbrowser_proxy(proxy_config)
 
 
 def _api_post(path: str, body: Optional[dict[str, Any]] = None) -> Any:
@@ -52,22 +87,23 @@ def _api_post(path: str, body: Optional[dict[str, Any]] = None) -> Any:
     return data.get("data")
 
 
-def _github_ready_fingerprint(os_type: str = "win") -> dict[str, Any]:
+def _github_browser_fingerprint(os_type: str = "win") -> dict[str, Any]:
     """
-    生成适合 GitHub 等严格风控的高仿真指纹，与代理 IP 一致、无自动化痕迹。
-    时区/语言/地理位置按代理 IP 自动生成；WebRTC 替换为代理 IP；canvas/webGL 等为随机噪音。
+    GitHub / Arkose 场景指纹：与代理 IP 对齐 + 噪声字段交给 BitBrowser 随机化。
+    UA/version 留空由客户端按内核生成，避免手写与真实 Chromium 不一致。
     """
     if os_type.lower() in ("win", "windows"):
-        os_platform, os_version = "Win32", "11,10"
+        os_platform, os_version = "Win64", "11,10"
         resolution = "1920 x 1080"
-        device_pixel_ratio, hardware_concurrency, device_memory = "1", "8", "8"
+        dpr, cores, mem = "1", "8", "8"
     else:
         os_platform, os_version = "MacIntel", ""
         resolution = "1920 x 1080"
-        device_pixel_ratio, hardware_concurrency, device_memory = "2", "10", "8"
+        dpr, cores, mem = "2", "10", "8"
+
     return {
         "coreProduct": "chrome",
-        "coreVersion": "126",
+        "coreVersion": "",
         "ostype": "PC",
         "os": os_platform,
         "osVersion": os_version,
@@ -77,16 +113,16 @@ def _github_ready_fingerprint(os_type: str = "win") -> dict[str, Any]:
         "timeZone": "",
         "timeZoneOffset": 0,
         "webRTC": "0",
-        "ignoreHttpsErrors": True,
+        "ignoreHttpsErrors": False,
         "position": "1",
         "isIpCreatePosition": True,
         "isIpCreateLanguage": True,
         "resolutionType": "1",
         "resolution": resolution,
-        "devicePixelRatio": device_pixel_ratio,
+        "devicePixelRatio": dpr,
         "colorDepth": 24,
-        "hardwareConcurrency": hardware_concurrency,
-        "deviceMemory": device_memory,
+        "hardwareConcurrency": cores,
+        "deviceMemory": mem,
         "fontType": "0",
         "canvas": "0",
         "webGL": "0",
@@ -96,8 +132,35 @@ def _github_ready_fingerprint(os_type: str = "win") -> dict[str, Any]:
         "clientRects": "0",
         "deviceNameType": "1",
         "deviceName": "",
-        # Bitbrowser API：0=开启 DNT，1=关闭 DNT。必须为 "1" 关闭 DNT，否则 Arkose 验证码易报错
+        # BitBrowser：0=开 DNT，1=关 DNT。关 DNT 更利于 Arkose/OctoCaptcha
         "doNotTrack": "1",
+    }
+
+
+def _github_profile_side_options(
+    *,
+    workbench: str,
+    sync_tabs: bool,
+) -> dict[str, Any]:
+    """
+    与「指纹」无关、但对自动化/少标签页友好的档案选项。
+    """
+    return {
+        "randomFingerprint": False,
+        "clearCacheFilesBeforeLaunch": False,
+        "clearCookiesBeforeLaunch": False,
+        "clearHistoriesBeforeLaunch": False,
+        "disableTranslatePopup": True,
+        "disableNotifications": True,
+        "abortImage": False,
+        "abortMedia": False,
+        "disableGpu": False,
+        "muteAudio": False,
+        "credentialsEnableService": False,
+        "ipCheckService": "ip-api",
+        "allowedSignin": True,
+        "workbench": workbench,
+        "syncTabs": sync_tabs,
     }
 
 
@@ -114,21 +177,22 @@ def _platform_icon_from_url(platform: str) -> str:
 def create_github_ready_browser(
     name: str,
     proxy_config: Optional[dict[str, Any]] = None,
-    url: str = "https://github.com/signup",
-    platform: str = "https://github.com",
+    url: str = "",
+    platform: str = "",
     os_type: str = "win",
     **kwargs: Any,
 ) -> dict[str, Any]:
     """
-    创建面向 GitHub 注册的高仿真浏览器档案（使用 Starry 代理）。
-    指纹与代理 IP 一致，避免风控检测到 IP 与浏览器环境不符。
-    指纹中 doNotTrack=1（关闭 DNT）、abortImage/abortMedia=False，以利于 Arkose 验证码加载。
-    若出现「We couldn't create your account」或验证码报错，请见项目内 TROUBLESHOOTING.md；
-    官方排查：https://docs.github.com/zh/get-started/using-github/troubleshooting-connectivity-problems
-    要点：代理/网络须允许 https://octocaptcha.com/ 与 https://arkoselabs.com/ ，可用同一档案访问 octocaptcha.com/test 自测。
-    :return: API 返回的 data（含 id, seq 等）
+    创建用于 GitHub 注册的档案（POST /browser/update）。
+
+    :param url: BitBrowser「额外打开」的 URL，逗号分隔；建议留空，由平台首页 + 自动化导航，减少多标签。
+    :param platform: 绑定平台 URL，影响图标与首启页。
+    :param os_type: win | mac，决定指纹里的 OS 字段。
     """
     platform_icon = _platform_icon_from_url(platform)
+    workbench = kwargs.pop("workbench", "disable")
+    sync_tabs = kwargs.pop("syncTabs", False)
+
     body: dict[str, Any] = {
         "name": name,
         "url": url,
@@ -139,55 +203,43 @@ def create_github_ready_browser(
         "password": kwargs.pop("password", ""),
         "proxyMethod": 2,
         "proxyType": "noproxy",
-        "browserFingerPrint": _github_ready_fingerprint(os_type=os_type),
-        "randomFingerprint": False,
-        "clearCacheFilesBeforeLaunch": False,
-        "clearCookiesBeforeLaunch": False,
-        "clearHistoriesBeforeLaunch": False,
-        "disableTranslatePopup": True,
-        "disableNotifications": True,
-        "abortImage": False,
-        "abortMedia": False,
-        "disableGpu": False,
-        "muteAudio": False,
-        "credentialsEnableService": False,
-        "ipCheckService": "ip-api",
-        "allowedSignin": True,
+        "browserFingerPrint": _github_browser_fingerprint(os_type=os_type),
+        **_github_profile_side_options(workbench=workbench, sync_tabs=sync_tabs),
         **kwargs,
     }
-    body.update(_starry_to_bitbrowser_proxy(proxy_config))
+    body.update(_to_bitbrowser_proxy(proxy_config))
     return _api_post("/browser/update", body)
 
 
-def create_browser(
-    name: str,
-    proxy_config: Optional[dict[str, Any]] = None,
-    url: str = "",
-    platform: str = "https://www.google.com",
-    fingerprint: Optional[dict[str, Any]] = None,
-    **kwargs: Any,
-) -> dict[str, Any]:
+def close_extra_tabs_after_open(
+    cdp_ws_url: str,
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
     """
-    创建浏览器档案（使用 Starry 代理）。
-    :param fingerprint: None 或 {} 表示随机生成
-    :return: API 返回的 data（含 id, seq 等）
+    打开窗口后通过 CDP 关闭除第一个标签外的所有页。
+    BitBrowser 首启仍可能叠加「平台页 + 工作台」等，此处收敛为单标签便于自动化。
     """
-    platform_icon = _platform_icon_from_url(platform) if platform else ""
-    body: dict[str, Any] = {
-        "name": name,
-        "url": url or platform,
-        "platform": platform,
-        "platformIcon": platform_icon,
-        "remark": kwargs.pop("remark", ""),
-        "userName": kwargs.pop("userName", ""),
-        "password": kwargs.pop("password", ""),
-        "proxyMethod": 2,
-        "proxyType": "noproxy",
-        "browserFingerPrint": fingerprint if fingerprint is not None else {},
-        **kwargs,
-    }
-    body.update(_starry_to_bitbrowser_proxy(proxy_config))
-    return _api_post("/browser/update", body)
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            br = p.chromium.connect_over_cdp(cdp_ws_url)
+            if not br.contexts:
+                return
+            ctx = br.contexts[0]
+            pages = list(ctx.pages)
+            if len(pages) <= 1:
+                return
+            for pg in pages[1:]:
+                try:
+                    pg.close()
+                except Exception:
+                    pass
+            if callable(log):
+                log(f"已关闭多余标签页，保留 1 个（原有 {len(pages)} 个）")
+    except Exception as e:
+        if callable(log):
+            log(f"收敛标签页时跳过: {e}")
 
 
 def open_browser(
@@ -197,11 +249,17 @@ def open_browser(
     load_extensions: bool = False,
 ) -> dict[str, Any]:
     """
-    根据档案 id 打开浏览器，返回 CDP 地址与驱动路径。
-    风控场景请勿传 args（尤其不要 --headless）。默认不加载扩展，避免拦截验证码。
+    打开浏览器窗口（POST /browser/open）。
+
+    默认使用 GITHUB_REGISTER_LAUNCH_ARGS；勿传 headless；需要完全自定义时传入 args。
     """
-    body: dict[str, Any] = {"id": profile_id, "loadExtensions": load_extensions}
-    if args is not None:
+    body: dict[str, Any] = {
+        "id": profile_id,
+        "loadExtensions": BITBROWSER_LOAD_EXTENSIONS if not load_extensions else True,
+    }
+    if args is None:
+        body["args"] = list(GITHUB_REGISTER_LAUNCH_ARGS)
+    else:
         body["args"] = args
     if queue:
         body["queue"] = True
@@ -213,23 +271,10 @@ def close_browser(profile_id: str) -> dict[str, Any]:
     return _api_post("/browser/close", {"id": profile_id})
 
 
-def get_browser_detail(profile_id: str) -> dict[str, Any]:
-    """获取档案详情。"""
-    return _api_post("/browser/detail", {"id": profile_id})
-
-
-def list_browsers(
-    page: int = 0,
-    page_size: int = 20,
-    **filters: Any,
-) -> dict[str, Any]:
-    """分页获取档案列表。filters 可为 name, remark, groupId 等。"""
-    body = {"page": page, "pageSize": page_size, **filters}
-    return _api_post("/browser/list", body)
-
-
 def check_proxy_ip(
     proxy_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """使用 Starry 代理请求 ipinfo.io，返回当前出口 IP 信息。"""
-    return get_proxy_ip_info(proxy_config)
+    """通过代理请求 ipinfo.io，返回当前出口 IP 信息。"""
+    from proxy_config import check_proxy_ip as _check
+
+    return _check(proxy_config)

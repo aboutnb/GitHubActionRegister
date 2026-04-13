@@ -612,19 +612,3 @@ def get_verification_code_from_inbox(
     return None, None, diag
 
 
-# ---------------------------------------------------------------------------
-# 命令行入口
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    if not GRAPH_CLIENT_SECRET:
-        print("Set GRAPH_CLIENT_SECRET in .env.local", file=sys.stderr)
-        sys.exit(1)
-    try:
-        data = get_inbox(top=5)
-        for msg in data.get("value", []):
-            s = msg.get("sender", {}).get("emailAddress", {})
-            print(msg.get("receivedDateTime"), s.get("address"), msg.get("subject"))
-    except Exception as e:
-        print("Error:", e, file=sys.stderr)
-        sys.exit(1)
