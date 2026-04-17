@@ -93,3 +93,37 @@ def check_proxy_ip(config: Optional[dict[str, str]] = None) -> dict[str, Any]:
         resp = requests.get(IPINFO_URL, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
+
+
+def test_proxy_connectivity(
+    config: Optional[dict[str, str]] = None,
+    timeout: int = 10,
+) -> tuple[bool, str]:
+    """
+    快速检测代理是否可用（通过代理访问 github.com）。
+
+    :return: (ok, message)  ok=True 代理正常, ok=False 附带错误信息
+    """
+    cfg = config or get_proxy_config()
+    if not is_proxy_configured(cfg):
+        return True, "未配置代理，直连"
+    proxy_url = build_proxy_url(cfg)
+    proxies = {"http": proxy_url, "https": proxy_url}
+    try:
+        resp = requests.head(
+            "https://github.com",
+            proxies=proxies,
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        return True, f"代理可用（HTTP {resp.status_code}）"
+    except requests.exceptions.ProxyError as e:
+        return False, f"代理连接失败: {e}"
+    except requests.exceptions.ConnectTimeout:
+        return False, f"代理连接超时（{timeout}s）"
+    except requests.exceptions.SSLError as e:
+        return False, f"代理 TLS 错误: {e}"
+    except Exception as e:
+        if "Missing dependencies for SOCKS support" in str(e):
+            return False, "缺少 SOCKS 依赖：请安装 PySocks（pip install pysocks）"
+        return False, f"代理检测异常: {e}"

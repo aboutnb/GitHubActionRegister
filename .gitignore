@@ -1,6 +1,3 @@
-# Graph token cache (contains refresh token)
-.graph_tokens.json
-
 # Env with secrets
 .env.local
 
@@ -14,3 +11,6 @@ __pycache__/
 
 # IDE
 .idea/
+
+# GitHub 2FA recovery codes（敏感）
+recovery_codes/

@@ -29,6 +29,7 @@ SHORT_TIMEOUT = 3000            # 可选控件短超时
 # URL
 URL_GITHUB = "https://github.com"
 URL_GITHUB_SIGNUP = "https://github.com/signup"
+URL_GITHUB_LOGIN = "https://github.com/login"
 URL_GITHUB_SECURITY = "https://github.com/settings/security"
 
 # 选择器（集中维护，便于应对 GitHub 前端变更）
@@ -1043,7 +1044,31 @@ async def _detect_captcha_state(page) -> str:
         if iframe_info and iframe_info.get("found") and iframe_info.get("visible"):
             return "captcha"
 
-        # 7. iframe 存在但不可见（预加载状态），或页面文本含验证码关键词
+        # 7. 验证直接通过（绿色对号）：页面仍在 signup URL，但出现
+        #    "Verify your account" + "Create account" 按钮 → 视为 passed
+        if any(p in url for p in SIGNUP_URL_PATTERNS):
+            try:
+                verify_create = await page.evaluate("""() => {
+                    const txt = (document.body.innerText || '').toLowerCase();
+                    const verifyMarkers = [
+                        'verify your account', '验证你的帐户', '验证你的账户',
+                        'verify your email', 'account verification',
+                    ];
+                    const hasVerify = verifyMarkers.some(m => txt.includes(m));
+                    const createBtn = [...document.querySelectorAll('button, a')]
+                        .find(b => {
+                            const t = (b.textContent || '').trim().toLowerCase();
+                            return (t.includes('create account') || t === '创建账号' || t === '创建帐户')
+                                && b.offsetWidth > 0 && b.offsetHeight > 0;
+                        });
+                    return {hasVerify: hasVerify, hasCreateBtn: !!createBtn};
+                }""")
+                if verify_create and verify_create.get("hasVerify") and verify_create.get("hasCreateBtn"):
+                    return "passed"
+            except Exception:
+                pass
+
+        # 8. iframe 存在但不可见（预加载状态），或页面文本含验证码关键词
         # 在注册页上时只算 signup_page（可能还没真正触发验证码）
         if any(p in url for p in SIGNUP_URL_PATTERNS):
             return "signup_page"
@@ -1174,17 +1199,20 @@ async def try_finalize_verify_create_account(
     )
     has_create_copy = any(m in txt for m in create_markers)
 
-    # 严格：有验证页语义 + 有创建账号文案
-    if on_verify_copy and has_create_copy:
+    # 验证页：只要页面语义命中「Verify your account」，就尝试点击 Create account。
+    # 说明：有时按钮文案不一定能被 inner_text("body")稳定抓到（例如渲染延迟/可访问性标签），
+    # 因此不再强依赖 has_create_copy。
+    if on_verify_copy:
         if await _click_visible_create_account_cta(page, log):
             log("验证已通过，已自动点击 Create account 继续")
             return True
+        # 若确认为验证页但未点到，留给上层循环继续重试
         return False
 
     # 宽松：仅当页面已有「验证账户」类文案时再点。注册首屏也有 Create account，
     # 绝不能仅凭 has_create_copy 点击，否则 goto 回 /signup 后会误触表单主按钮。
     if seen_captcha_iframe and not await _captcha_iframe_visible_now(page):
-        if on_verify_copy:
+        if on_verify_copy and has_create_copy:
             if await _click_visible_create_account_cta(page, log):
                 log("人机验证已结束，已自动点击 Create account 继续")
                 return True
@@ -1332,6 +1360,10 @@ async def wait_for_captcha_done(
                     break
 
             if state == "signup_page":
+                if await try_finalize_verify_create_account(
+                    page, log, seen_captcha_iframe=seen_captcha_iframe
+                ):
+                    return True
                 if waited > 0 and int(waited) % 10 == 0:
                     log(f"仍在注册页但验证码未触发，继续等待... ({int(waited)}s)")
             else:
@@ -1373,20 +1405,36 @@ async def wait_for_captcha_done(
         if _check_captcha_401_abort(http_state, log):
             return False
 
-        # ---- 阶段 2：以页面检测为主（完成验证 / 出现并点击「创建账号」/ URL 进入下一步），max_wait 仅作安全超时
-        deadline = time.monotonic() + float(max_wait)
-        if not allow_manual:
-            log(
-                "人机验证：未开启 CAPTCHA_MANUAL_WAIT，仍将轮询检测完成与「创建账号」按钮；"
-                "若需自己在浏览器里点，请在 .env 设置 CAPTCHA_MANUAL_WAIT=1"
-            )
-        else:
-            log(
-                "请在浏览器中完成人机验证；完成后将检测页面并尽量自动点击「创建账号」以进入邮箱验证等后续步骤…"
-            )
+        # ---- 阶段 2：活跃检测 + 分级超时 ----
+        # 基础上限 max_wait 秒（默认 150s）为硬上限
+        # 活跃延长：基础上限到达时，若 iframe 仍可见，最多再延长一个 ACTIVE_WINDOW（60s）
+        # 延长上限 = base + ACTIVE_WINDOW，不可无限续期
+        ACTIVE_WINDOW = 60.0
+        now = time.monotonic()
+        base_timeout = float(max_wait) if float(max_wait) > 0 else 150.0
+        base_deadline = now + base_timeout
+        hard_deadline = base_deadline + ACTIVE_WINDOW
+        extended = False
+        last_state = ""
 
-        next_progress_log = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
+        log("等待人机验证完成…")
+
+        while True:
+            now = time.monotonic()
+
+            if now >= base_deadline and not extended:
+                captcha_still = await _captcha_iframe_visible_now(page)
+                if captcha_still:
+                    extended = True
+                    log(f"基础等待 {base_timeout:.0f}s 到期，验证码仍可见，延长 {ACTIVE_WINDOW:.0f}s")
+                else:
+                    log("人机验证等待超时（验证码已不可见）")
+                    return False
+
+            if now >= hard_deadline:
+                log("人机验证等待超时（已达最大延长时限）")
+                return False
+
             if _check_captcha_401_abort(http_state, log):
                 return False
             try:
@@ -1394,7 +1442,8 @@ async def wait_for_captcha_done(
             except SignupFormError:
                 return False
 
-            if await _captcha_iframe_visible_now(page):
+            captcha_visible = await _captcha_iframe_visible_now(page)
+            if captcha_visible:
                 seen_captcha_iframe = True
 
             if await try_finalize_verify_create_account(
@@ -1403,12 +1452,22 @@ async def wait_for_captcha_done(
                 return True
 
             st = await _detect_captcha_state(page)
+
+            if st != last_state:
+                if st == "captcha":
+                    log("验证码可见，等待手动完成...")
+                elif st == "passed":
+                    pass
+                elif st == "signup_page" and last_state == "captcha":
+                    log("验证码已消失，检测验证结果...")
+                last_state = st
+
             if st == "passed":
                 if await try_finalize_verify_create_account(
                     page, log, seen_captcha_iframe=seen_captcha_iframe
                 ):
                     return True
-                log("已进入注册后续页面（URL）")
+                log("已进入注册后续页面")
                 return True
             if st == "form_error":
                 log("检测到表单校验错误，跳过此账号")
@@ -1416,7 +1475,7 @@ async def wait_for_captcha_done(
             if st == "error":
                 if error_recovery_count < MAX_ERROR_RECOVERIES:
                     error_recovery_count += 1
-                    log(f"等待中页面异常，尝试恢复... (第 {error_recovery_count} 次)")
+                    log(f"页面异常，尝试恢复 (第 {error_recovery_count} 次)")
                     st = await _recover_from_error(page, log)
                     if st == "passed":
                         if await try_finalize_verify_create_account(
@@ -1435,16 +1494,6 @@ async def wait_for_captcha_done(
                 return False
 
             await _captcha_interruptible_sleep(http_state, float(poll_interval))
-            now = time.monotonic()
-            if now >= next_progress_log:
-                remaining = int(deadline - now)
-                log(f"仍待人机验证或「创建账号」…（剩余约 {max(0, remaining)}s 超时）")
-                next_progress_log = now + 15.0
-
-        log(
-            "人机验证阶段超时：在限定时间内未检测到验证完成，或未能点击「创建账号」进入下一步"
-        )
-        return False
 
 
 async def fill_verification_code(
@@ -1496,33 +1545,246 @@ async def fill_verification_code(
 
 
 # ---------------------------------------------------------------------------
-# 2FA：从页面解析 TOTP secret
+# 登录 GitHub（注册完成后自动跳转到登录页）
 # ---------------------------------------------------------------------------
 
-OTP_SECRET_PATTERNS = [
-    (re.compile(r"secret=([A-Z2-7]+)", re.I), 1),
-    (re.compile(r'data-secret="([^"]+)"'), 1),
-    (re.compile(r"otpauth://[^?]+\?[^\s'\"]*secret=([A-Z2-7]+)"), 1),
-]
+SEL_LOGIN_EMAIL = 'input[id="login_field"], input[name="login"]'
+SEL_LOGIN_PASSWORD = 'input[id="password"], input[name="password"]'
+SEL_LOGIN_SUBMIT = 'input[type="submit"][value*="Sign in"], button[type="submit"]:has-text("Sign in"), input[name="commit"]'
 
 
-def _extract_otp_secret_from_page(html_or_text: str) -> str:
-    """从 GitHub 2FA 设置页或 otpauth URL 中解析 TOTP 密钥。"""
-    for pattern, group in OTP_SECRET_PATTERNS:
-        m = pattern.search(html_or_text)
-        if m:
-            return m.group(group).strip()
+async def run_login(
+    cdp_ws_url: str,
+    email: str,
+    password: str,
+    log_callback: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """
+    在浏览器中完成 GitHub 登录（邮箱 + 密码）。
+    注册完成后 GitHub 会跳转到登录页，直接导航到登录页填入邮箱和密码。
+    """
+    def log(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
+
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        try:
+            browser, page = await _connect_and_get_page(p, cdp_ws_url)
+        except Exception as e:
+            log(f"CDP 连接失败: {e}")
+            return False
+        if not page:
+            return False
+
+        try:
+            # 注册成功后 GitHub 自动跳转到登录页，不再手动导航
+            await page.wait_for_load_state(LOAD_STATE_THEN, timeout=NAV_NO_TIMEOUT)
+            await _human_delay((2000, 3500))
+
+            # 填入邮箱
+            log("填入登录邮箱...")
+            await page.wait_for_selector(SEL_LOGIN_EMAIL, timeout=SELECTOR_TIMEOUT, state="visible")
+            await _typewriter(page, SEL_LOGIN_EMAIL, email)
+            await _human_delay((500, 1200))
+
+            # 填入密码
+            log("填入登录密码...")
+            await _typewriter(page, SEL_LOGIN_PASSWORD, password)
+            await _human_delay((800, 1500))
+
+            # 点击 Sign in
+            submit = await page.query_selector(SEL_LOGIN_SUBMIT)
+            if submit:
+                await submit.click()
+            else:
+                await page.keyboard.press("Enter")
+
+            await page.wait_for_load_state(LOAD_STATE_THEN, timeout=NAV_NO_TIMEOUT)
+            await _human_delay((3000, 5000))
+
+            # 检查登录结果
+            url = page.url.lower()
+            if "login" in url or "session" in url:
+                body = await page.inner_text("body")
+                if "incorrect" in body.lower() or "wrong" in body.lower():
+                    log("登录失败：用户名或密码错误")
+                    return False
+                log("仍在登录页，可能需要额外验证")
+                return False
+
+            log("GitHub 登录成功")
+            return True
+        except Exception as e:
+            log(f"登录异常: {e}")
+            return False
+
+
+# ---------------------------------------------------------------------------
+# 2FA：导航到设置页 → 提取 TOTP secret → 生成验证码 → 填入并启用
+# ---------------------------------------------------------------------------
+
+URL_GITHUB_2FA = "https://github.com/settings/security"
+URL_GITHUB_2FA_SETUP = "https://github.com/settings/two_factor_authentication/setup/intro"
+
+OTP_SECRET_RE = re.compile(r"(?<![A-Za-z0-9/=])(?=[A-Z2-7]*[2-7])[A-Z2-7]{16,}(?![A-Za-z0-9/=])")
+
+SEL_SETUP_KEY_BTN = (
+    'button:has-text("setup key"), a:has-text("setup key"), '
+    'button:has-text("Setup key"), a:has-text("Setup key"), '
+    '[data-action*="setup-key"], button:has-text("设置密钥")'
+)
+SEL_TOTP_INPUT = (
+    'input[id*="totp"], input[id*="otp"], input[name*="otp"], '
+    'input[placeholder*="XXXXXX"], input[placeholder*="6-digit"], '
+    'input[placeholder*="验证码"], input[autocomplete="one-time-code"], '
+    'input[id*="app_otp"]'
+)
+SEL_ENABLE_BTN_SELECTORS = (
+    'button[type="submit"]:has-text("Continue")',
+    'button:has-text("Continue")',
+    'button[type="submit"]:has-text("Save")',
+    'button:has-text("Save")',
+    'button:has-text("Enable")',
+    'button:has-text("Verify")',
+    'button:has-text("启用")',
+    'button:has-text("保存")',
+    'button:has-text("验证")',
+)
+SEL_RECOVERY_DONE_SELECTORS = (
+    'button:has-text("I have saved my recovery codes")',
+    'a:has-text("I have saved my recovery codes")',
+    'button:has-text("Done")',
+    'button:has-text("I have saved")',
+    'button:has-text("已保存")',
+    'button:has-text("完成")',
+)
+
+SEL_RECOVERY_DOWNLOAD_SELECTORS = (
+    'a:has-text("Download")',
+    'button:has-text("Download")',
+    'a[download]',
+    'button[data-hydro-click*="recovery_codes"]',
+    'button:has-text("下载")',
+    'a:has-text("下载")',
+)
+
+
+async def _human_click_first_visible_in_selector_list(
+    page,
+    selectors: tuple[str, ...],
+    log: Callable[[str], None],
+    *,
+    label: str,
+) -> bool:
+    """
+    依次尝试一组 CSS 选择器：只对「可见且可用」的元素做滚动 +轻延迟点击。
+    解决 query_selector 命中隐藏节点导致 hover/click 超时的问题。
+    """
+    for sel in selectors:
+        loc_all = page.locator(sel)
+        try:
+            n = await loc_all.count()
+        except Exception:
+            continue
+        for i in range(n):
+            item = loc_all.nth(i)
+            try:
+                if not await item.is_visible():
+                    continue
+                if await item.is_disabled():
+                    continue
+                await item.scroll_into_view_if_needed()
+                await asyncio.sleep(random.uniform(0.25, 0.65))
+                await item.click(timeout=20000)
+                log(f"{label}（{sel}）")
+                return True
+            except Exception as e:
+                log(f"{label} 尝试失败（{sel} #{i+1}）: {e}")
+                try:
+                    await item.scroll_into_view_if_needed()
+                    await asyncio.sleep(random.uniform(0.2, 0.45))
+                    await item.click(timeout=20000, force=True)
+                    log(f"{label}（force，{sel}）")
+                    return True
+                except Exception:
+                    continue
+    return False
+
+
+async def _wait_for_recovery_codes_page(page, log: Callable[[str], None], timeout_sec: float = 90.0) -> bool:
+    """等待进入 recovery codes 页面（URL 或文案）。"""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            url = (page.url or "").lower()
+        except Exception:
+            url = ""
+        if "two_factor_authentication" in url and (
+            "download" in url or "recovery" in url or "intro" in url
+        ):
+            return True
+        try:
+            if await page.locator("text=Download your recovery codes").first.is_visible():
+                return True
+            if await page.get_by_role("heading", name=re.compile(r"recovery codes", re.I)).first.is_visible():
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.8)
+    log("等待 recovery codes 页面超时")
+    return False
+
+
+def _extract_totp_secret(text: str) -> str:
+    """从页面 HTML / 文本中提取 TOTP secret（16+ 位 Base32）。"""
+    # otpauth URI 中的 secret 参数
+    m = re.search(r"secret=([A-Z2-7]{16,})", text, re.I)
+    if m:
+        return m.group(1).upper()
+    # data-secret 属性
+    m = re.search(r'data-secret="([^"]+)"', text)
+    if m and len(m.group(1)) >= 16:
+        return m.group(1).upper()
+    # 页面中独立的 Base32 字符串
+    for m in OTP_SECRET_RE.finditer(text):
+        candidate = m.group(0)
+        if 16 <= len(candidate) <= 64:
+            return candidate.upper()
     return ""
 
 
 async def run_enable_2fa_and_get_secret(
     cdp_ws_url: str,
+    email: str = "",
     log_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
-    在已登录的浏览器中：打开 GitHub Settings → 2FA 设置页，
-    从页面中解析 TOTP secret 并返回。若需输入当前密码或验证码，由人工在浏览器中完成。
+    完整 2FA 启用流程（已登录状态下调用）：
+      1. 导航到 Settings → Password and authentication
+      2. 点击 Enable two-factor authentication
+      3. 点击 setup key 获取 TOTP secret
+      4. 用 pyotp 生成 6 位验证码并填入
+      5. 点击确认/保存
+      6. 处理 recovery codes 页面
+    返回 TOTP secret（空字符串表示失败）。
     """
+    import pyotp
+    import os
+    from datetime import datetime
+
+    def _safe_email_for_filename(s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            return ""
+        # 只保留邮箱名（@ 前），不带域名
+        if "@" in s:
+            s = s.split("@", 1)[0]
+        s = re.sub(r"[^a-zA-Z0-9._-]+", "_", s)
+        s = re.sub(r"_+", "_", s).strip("._-")
+        return s[:80]
+
     def log(msg: str) -> None:
         if log_callback:
             log_callback(msg)
@@ -1539,32 +1801,226 @@ async def run_enable_2fa_and_get_secret(
             return ""
 
         try:
-            log("打开 GitHub 2FA 设置页...")
-            await page.goto(URL_GITHUB_SECURITY, wait_until=NAV_WAIT_UNTIL, timeout=NAV_NO_TIMEOUT)
+            # -- 步骤 1: 导航到 2FA 设置页 --
+            log("导航到 GitHub 安全设置页...")
+            await page.goto(URL_GITHUB_2FA, wait_until=NAV_WAIT_UNTIL, timeout=NAV_NO_TIMEOUT)
             await page.wait_for_load_state(LOAD_STATE_THEN, timeout=NAV_NO_TIMEOUT)
-            await asyncio.sleep(1.5)
+            await _human_delay((2000, 4000))
 
-            enable_btn = await page.query_selector(
-                'button:has-text("Enable two-factor"), a:has-text("Enable two-factor"), '
-                'button:has-text("Two-factor")'
-            )
-            if enable_btn:
-                await enable_btn.click()
-                await asyncio.sleep(1.5)
+            # -- 步骤 2: 点击 Enable two-factor authentication --
+            enable_selectors = [
+                'a:has-text("Enable two-factor")',
+                'button:has-text("Enable two-factor")',
+                'a:has-text("Enable")',
+                'button:has-text("Enable")',
+                'a[href*="two_factor"]',
+            ]
+            clicked = False
+            for sel in enable_selectors:
+                try:
+                    btn = await page.query_selector(sel)
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        clicked = True
+                        log("已点击 Enable two-factor authentication")
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                log("未找到 Enable 按钮，尝试直接导航到 2FA 设置页...")
+                await page.goto(URL_GITHUB_2FA_SETUP, wait_until=NAV_WAIT_UNTIL, timeout=NAV_NO_TIMEOUT)
+
+            await page.wait_for_load_state(LOAD_STATE_THEN, timeout=NAV_NO_TIMEOUT)
+            await _human_delay((2000, 4000))
+
+            # -- 步骤 3: 点击 setup key 获取 TOTP secret --
+            secret = ""
+
+            # 先尝试直接从页面提取（有些页面直接显示 secret）
+            page_content = await page.content()
+            secret = _extract_totp_secret(page_content)
+
+            if not secret:
+                # 点击 "setup key" 链接/按钮
+                setup_key_btn = await page.query_selector(SEL_SETUP_KEY_BTN)
+                if setup_key_btn:
+                    await setup_key_btn.click()
+                    log("已点击 setup key")
+                    await _human_delay((1000, 2000))
+                    page_content = await page.content()
+                    secret = _extract_totp_secret(page_content)
+
+            if not secret:
+                # 兜底：从页面可见文本中提取
+                body_text = await page.inner_text("body")
+                secret = _extract_totp_secret(body_text)
+
+            if not secret:
+                log("未能从页面提取 TOTP secret")
+                return ""
+
+            log(f"已提取 TOTP secret: {secret}")
+
+            # -- 步骤 4: 用 pyotp 生成 6 位验证码 --
+            totp = pyotp.TOTP(secret)
+            otp_code = totp.now()
+            log(f"已生成 TOTP 验证码: {otp_code}")
+
+            # -- 步骤 5: 填入验证码 --
+            await _human_delay((500, 1200))
+            totp_input = await page.query_selector(SEL_TOTP_INPUT)
+            if totp_input:
+                await totp_input.click()
+                await asyncio.sleep(0.3)
+                await page.keyboard.type(otp_code, delay=random.randint(80, 180))
+                log("已填入 TOTP 验证码")
             else:
-                # 新 UI 下按钮文案可能变化，或用户已在 2FA 页面上；
-                # 此时不再强行跳 URL，由用户在浏览器中自行导航到 2FA 设置页。
-                log("未找到 \"Enable two-factor\" 按钮，请在浏览器中手动进入 2FA 设置页后再次点击 UI 中的「开启 2FA 并获取密钥」。")
+                log("未找到 TOTP 输入框，尝试焦点输入...")
+                await page.keyboard.type(otp_code, delay=random.randint(80, 180))
 
-            # 不再强制跳转 /setup 或 /two_factor_authentication，直接在当前页面解析，
-            # 以避免 GitHub 将 /setup/intro 等路径返回 404。
-            content = await page.content()
-            secret = _extract_otp_secret_from_page(content)
-            if secret:
-                log("已解析 2FA 密钥（请按页面提示完成验证以启用）")
-                return secret
-            text = await page.inner_text("body")
-            return _extract_otp_secret_from_page(text) or ""
+            await _human_delay((800, 1500))
+
+            # GitHub 通常会在输入完 6 位验证码后自动校验并跳转到 recovery codes 页。
+            # 先等待自动跳转；若未跳转，再尝试点击提交按钮作为兜底。
+            log("等待 GitHub 自动校验并跳转到 recovery codes 页面...")
+            auto_ok = await _wait_for_recovery_codes_page(page, log, timeout_sec=20.0)
+            if not auto_ok:
+                log("未检测到自动跳转，尝试点击提交按钮继续...")
+                clicked_submit = await _human_click_first_visible_in_selector_list(
+                    page,
+                    SEL_ENABLE_BTN_SELECTORS,
+                    log,
+                    label="已点击 TOTP 提交按钮",
+                )
+                if not clicked_submit:
+                    await page.keyboard.press("Enter")
+                    log("未找到可见提交按钮，已按回车提交")
+
+                await page.wait_for_load_state(LOAD_STATE_THEN, timeout=NAV_NO_TIMEOUT)
+                await _human_delay((1200, 2200))
+
+                if not await _wait_for_recovery_codes_page(page, log, timeout_sec=90.0):
+                    log(f"仍未进入 recovery codes 页，当前 URL: {page.url}")
+
+            # -- 步骤 6: 处理 recovery codes 页面 --
+            # 先触发 Download 并保存，再点击 "I have saved my recovery codes" / "Done"
+            recovery_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "recovery_codes"
+            )
+            os.makedirs(recovery_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            email_part = _safe_email_for_filename(email)
+            if email_part:
+                save_path = os.path.join(recovery_dir, f"recovery_codes_{email_part}_{ts}.txt")
+            else:
+                save_path = os.path.join(recovery_dir, f"recovery_codes_{ts}.txt")
+
+            downloaded = False
+            # 1) Playwright download 事件（优先）
+            try:
+                dl_loc = page.get_by_role("button", name=re.compile(r"^\s*download\s*$", re.I)).first
+                if await dl_loc.is_visible():
+                    async with page.expect_download(timeout=45000) as dlinfo:
+                        await dl_loc.scroll_into_view_if_needed()
+                        await asyncio.sleep(random.uniform(0.35, 0.75))
+                        await dl_loc.click(timeout=20000)
+                    dl = await dlinfo.value
+                    await dl.save_as(save_path)
+                    log(f"已下载并保存 recovery codes: {save_path}")
+                    downloaded = True
+            except Exception:
+                pass
+
+            if not downloaded:
+                try:
+                    dl_loc = page.get_by_role("link", name=re.compile(r"download", re.I)).first
+                    if await dl_loc.is_visible():
+                        async with page.expect_download(timeout=45000) as dlinfo:
+                            await dl_loc.scroll_into_view_if_needed()
+                            await asyncio.sleep(random.uniform(0.35, 0.75))
+                            await dl_loc.click(timeout=20000)
+                        dl = await dlinfo.value
+                        await dl.save_as(save_path)
+                        log(f"已下载并保存 recovery codes: {save_path}")
+                        downloaded = True
+                except Exception:
+                    pass
+
+            if not downloaded:
+                # 2) CSS 列表 + 仍尝试 download 事件
+                for sel in SEL_RECOVERY_DOWNLOAD_SELECTORS:
+                    if downloaded:
+                        break
+                    loc_all = page.locator(sel)
+                    try:
+                        n = await loc_all.count()
+                    except Exception:
+                        continue
+                    for i in range(n):
+                        if downloaded:
+                            break
+                        item = loc_all.nth(i)
+                        try:
+                            if not await item.is_visible():
+                                continue
+                            await item.scroll_into_view_if_needed()
+                            await asyncio.sleep(random.uniform(0.35, 0.75))
+                            try:
+                                async with page.expect_download(timeout=45000) as dlinfo:
+                                    await item.click(timeout=20000)
+                                dl = await dlinfo.value
+                                await dl.save_as(save_path)
+                                log(f"已下载并保存 recovery codes: {save_path}")
+                                downloaded = True
+                                break
+                            except Exception:
+                                # 可能不是标准 download（或需要 force）；继续尝试其它候选
+                                try:
+                                    await item.click(timeout=20000, force=True)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            continue
+
+            if not downloaded:
+                # 3) 页面文本提取 recovery codes
+                try:
+                    txt = await page.inner_text("body")
+                    codes = re.findall(r"\b[0-9a-f]{4,}-[0-9a-f]{4,}\b", txt, flags=re.I)
+                    if codes:
+                        with open(save_path, "w", encoding="utf-8") as f:
+                            f.write("\n".join(codes) + "\n")
+                        log(f"已提取并保存 recovery codes: {save_path}")
+                    else:
+                        log("未触发下载且未从页面解析到 recovery codes")
+                except Exception as e:
+                    log(f"保存 recovery codes 文本失败: {e}")
+
+            # 点击确认已保存
+            saved_clicked = await _human_click_first_visible_in_selector_list(
+                page,
+                SEL_RECOVERY_DONE_SELECTORS,
+                log,
+                label="已确认保存 recovery codes",
+            )
+            if not saved_clicked:
+                try:
+                    done = page.get_by_role(
+                        "button",
+                        name=re.compile(r"I have saved my recovery codes", re.I),
+                    ).first
+                    if await done.is_visible():
+                        await done.scroll_into_view_if_needed()
+                        await asyncio.sleep(random.uniform(0.3, 0.6))
+                        await done.click(timeout=20000)
+                        log("已确认保存 recovery codes（role匹配）")
+                except Exception as e:
+                    log(f"点击「已保存 recovery codes」失败: {e}")
+
+            log("2FA 启用流程完成")
+            return secret
+
         except Exception as e:
             log(f"2FA 步骤异常: {e}")
             return ""

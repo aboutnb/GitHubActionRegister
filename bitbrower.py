@@ -242,6 +242,25 @@ def close_extra_tabs_after_open(
             log(f"收敛标签页时跳过: {e}")
 
 
+def check_bitbrowser_alive() -> tuple[bool, str]:
+    """检测 BitBrowser 本地服务是否在线。"""
+    try:
+        url = f"{BITBROWSER_BASE_URL.rstrip('/')}/browser/list"
+        headers = {"x-api-key": BITBROWSER_API_KEY}
+        resp = requests.post(url, json={"page": 0, "pageSize": 1}, headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("success"):
+            return True, "BitBrowser 服务正常"
+        return False, f"BitBrowser 响应异常: {data.get('msg', '')}"
+    except requests.exceptions.ConnectionError:
+        return False, "无法连接 BitBrowser（请确认已启动）"
+    except requests.exceptions.Timeout:
+        return False, "BitBrowser 响应超时"
+    except Exception as e:
+        return False, f"BitBrowser 检测异常: {e}"
+
+
 def open_browser(
     profile_id: str,
     args: Optional[list[str]] = None,
@@ -269,6 +288,11 @@ def open_browser(
 def close_browser(profile_id: str) -> dict[str, Any]:
     """关闭指定档案的浏览器窗口。"""
     return _api_post("/browser/close", {"id": profile_id})
+
+
+def delete_browser(profile_id: str) -> dict[str, Any]:
+    """删除指定档案（含窗口关闭）。"""
+    return _api_post("/browser/delete", {"id": profile_id})
 
 
 def check_proxy_ip(

@@ -2,7 +2,7 @@
 小水滴微软邮箱 API 取件服务。
 接口文档: https://api.7gemail.com/apiDoc/getMailInfo
 
-无需 OAuth 授权，仅需邮箱账号+密码即可获取最新邮件（收件箱+垃圾箱）。
+传入邮箱账号+密码，调用 API 获取最新邮件，从 HTML 正文中提取验证码或验证链接。
 """
 from __future__ import annotations
 
@@ -19,51 +19,12 @@ import requests
 API_URL = "https://api.bujidian.com/getMailInfo"
 REQUEST_TIMEOUT = 30
 
-VERIFICATION_LINK_KEYWORDS = (
-    "verify", "confirm", "token", "signup", "email",
-    "verification", "verif",
-)
-LINK_RE = re.compile(r"https?://[^\s<>\"'\\)]+")
-HREF_URL_RE = re.compile(r'href\s*=\s*["\']?(https?://[^\s"\'<>]+)["\']?', re.IGNORECASE)
-URL_TRAILING_PUNCTUATION = ".,;:!?)\"'"
-
-LAUNCH_CODE_KEYWORDS = (
-    "launch code",
-    "code below",
-    "your github launch code",
-)
-LAUNCH_CODE_RE = re.compile(r"\b(\d{6,8})\b")
-
-
-# ---------------------------------------------------------------------------
-# 内部工具函数
-# ---------------------------------------------------------------------------
-
-def _normalize_text(text: str) -> str:
-    return text.replace("\r\n", "").replace("\n", "").replace("\r", "")
-
-
-def _strip_trailing(url: str) -> str:
-    return url.rstrip(URL_TRAILING_PUNCTUATION)
-
-
-def _is_verification_url(url: str) -> bool:
-    if not url or "github.com" not in url:
-        return False
-    if url.count("https://") + url.count("http://") != 1:
-        return False
-    return any(k in url for k in VERIFICATION_LINK_KEYWORDS)
-
-
-def _extract_launch_code(text: str) -> Optional[str]:
-    t = (text or "").lower()
-    if not any(k in t for k in LAUNCH_CODE_KEYWORDS):
-        return None
-    for m in LAUNCH_CODE_RE.finditer(text or ""):
-        code = m.group(1)
-        if code and code.isdigit():
-            return code
-    return None
+# 6-8 位纯数字验证码
+CODE_RE = re.compile(r"\b(\d{6,8})\b")
+# HTML href 中的链接
+HREF_RE = re.compile(r'href\s*=\s*["\']?(https?://[^\s"\'<>]+)', re.IGNORECASE)
+# 纯文本中的链接
+URL_RE = re.compile(r"https?://[^\s<>\"'\\)]+")
 
 
 # ---------------------------------------------------------------------------
@@ -77,12 +38,8 @@ def get_mail(
     subject: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    获取邮箱最新一封邮件（收件箱+垃圾箱）。
+    调用小水滴 API 获取邮箱最新一封邮件（收件箱+垃圾箱）。
 
-    :param name: 邮箱账号
-    :param pwd: 邮箱密码
-    :param sender: 可选，按发件人过滤
-    :param subject: 可选，按主题模糊匹配
     :return: {"subject", "sender", "send_time_utc", "send_time_beijing", "content"}
     :raises RuntimeError: API 返回失败
     """
@@ -101,98 +58,59 @@ def get_mail(
     return data["message"]
 
 
-def get_verification_link(
-    name: str,
-    pwd: str,
-    keyword: str = "github",
-) -> tuple[Optional[str], Optional[str]]:
-    """
-    获取邮箱最新的 GitHub 验证链接。
-
-    :return: (link, diagnostic)。找到时 diagnostic 为 None；未找到时 link 为 None。
-    """
-    try:
-        mail = get_mail(name, pwd, sender="github.com")
-    except RuntimeError as e:
-        return None, str(e)
-    except Exception as e:
-        return None, f"小水滴 API 请求异常: {e}"
-
-    content = mail.get("content") or ""
-    subj = (mail.get("subject") or "").lower()
-    sndr = (mail.get("sender") or "").lower()
-
-    if not (keyword.lower() in subj or keyword.lower() in content.lower() or "github.com" in sndr):
-        return None, (
-            f"小水滴取到最新邮件，但与 '{keyword}' 无关"
-            f"（主题: {mail.get('subject')}，发件人: {mail.get('sender')}）"
-        )
-
-    text = _normalize_text(content.replace("&amp;", "&"))
-    for url in LINK_RE.findall(text):
-        u = _strip_trailing(url.replace("&amp;", "&"))
-        if _is_verification_url(u):
-            return u, None
-    for url in HREF_URL_RE.findall(text):
-        u = _strip_trailing(url.replace("&amp;", "&"))
-        if _is_verification_url(u):
-            return u, None
-
-    return None, f"小水滴取到 GitHub 邮件，但未解析出验证链接（主题: {mail.get('subject')}）"
-
-
-def get_verification_code(
-    name: str,
-    pwd: str,
-    keyword: str = "github",
-) -> tuple[Optional[str], Optional[str]]:
-    """
-    获取邮箱最新的 GitHub 验证码（launch code，6-8 位数字）。
-
-    :return: (code, diagnostic)。找到时 diagnostic 为 None；未找到时 code 为 None。
-    """
-    try:
-        mail = get_mail(name, pwd, sender="github.com")
-    except RuntimeError as e:
-        return None, str(e)
-    except Exception as e:
-        return None, f"小水滴 API 请求异常: {e}"
-
-    content = mail.get("content") or ""
-    subj = (mail.get("subject") or "").lower()
-    sndr = (mail.get("sender") or "").lower()
-
-    if not (keyword.lower() in subj or keyword.lower() in content.lower() or "github.com" in sndr):
-        return None, (
-            f"小水滴取到最新邮件，但与 '{keyword}' 无关"
-            f"（主题: {mail.get('subject')}，发件人: {mail.get('sender')}）"
-        )
-
-    combined = (mail.get("subject") or "") + "\n" + content
-    code = _extract_launch_code(combined)
-    if code:
-        return code, None
-
-    return None, f"小水滴取到 GitHub 邮件，但未解析出验证码（主题: {mail.get('subject')}）"
-
-
 def get_verification_info(
     name: str,
     pwd: str,
     keyword: str = "github",
 ) -> tuple[Optional[str], Optional[str]]:
     """
-    获取 GitHub 验证信息（优先验证链接，其次验证码）。
+    一次 API 调用，从 GitHub 邮件中提取验证码或验证链接。
 
-    :return: (link_or_code, diagnostic)
+    流程：
+      1. 调用小水滴 API（sender=github.com）获取最新邮件
+      2. 从 content（HTML）中提取 6-8 位数字验证码
+      3. 若无验证码，提取 github.com/account_verifications 链接
+
+    :return: (code_or_link, diagnostic)
     """
-    link, diag = get_verification_link(name, pwd, keyword=keyword)
-    if link:
-        return link, None
-    code, diag_code = get_verification_code(name, pwd, keyword=keyword)
-    if code:
-        return code, None
-    return None, diag_code or diag
+    # 不传 sender 过滤，避免 API 精确匹配导致找不到邮件
+    try:
+        mail = get_mail(name, pwd)
+    except RuntimeError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"小水滴 API 请求异常: {e}"
+
+    subj = mail.get("subject") or ""
+    sender = (mail.get("sender") or "").lower()
+    content = (mail.get("content") or "").replace("&amp;", "&")
+
+    # 确认是 GitHub 邮件
+    if "github" not in subj.lower() and "github" not in sender:
+        return None, (
+            f"最新邮件不是 GitHub 的"
+            f"（主题: {subj}，发件人: {mail.get('sender')}）"
+        )
+
+    # 优先提取验证码：从 subject + content 中找 6-8 位数字
+    text = subj + "\n" + content
+    for m in CODE_RE.finditer(text):
+        return m.group(1), None
+
+    # 其次提取验证链接：从 href 属性中找 github.com 验证链接
+    for url in HREF_RE.findall(content):
+        if "github.com" in url and ("account_verifications" in url or "verify" in url or "confirm" in url):
+            return url, None
+
+    # 兜底：从纯文本中找
+    for url in URL_RE.findall(content):
+        if "github.com" in url and ("account_verifications" in url or "verify" in url or "confirm" in url):
+            return url, None
+
+    return None, (
+        f"小水滴取到 GitHub 邮件但未提取到验证码或链接"
+        f"（主题: {subj}）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +126,7 @@ if __name__ == "__main__":
     parser.add_argument("--sender", help="按发件人过滤")
     parser.add_argument("--subject", help="按主题模糊匹配")
     parser.add_argument("--verify", action="store_true",
-                        help="提取 GitHub 验证信息（链接或验证码）")
+                        help="提取 GitHub 验证信息（验证码或链接）")
     args = parser.parse_args()
 
     if args.verify:
@@ -226,7 +144,7 @@ if __name__ == "__main__":
             print(f"发件人: {info.get('sender')}")
             print(f"时间(UTC): {info.get('send_time_utc')}")
             print(f"时间(北京): {info.get('send_time_beijing')}")
-            print(f"正文: {info.get('content')}")
+            print(f"正文:\n{info.get('content')}")
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
