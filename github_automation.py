@@ -1652,13 +1652,18 @@ SEL_ENABLE_BTN_SELECTORS = (
     'button:has-text("保存")',
     'button:has-text("验证")',
 )
-SEL_RECOVERY_DONE_SELECTORS = (
+# 第一步：确认已保存 recovery codes
+SEL_RECOVERY_SAVED_SELECTORS = (
     'button:has-text("I have saved my recovery codes")',
     'a:has-text("I have saved my recovery codes")',
-    'button:has-text("Done")',
     'button:has-text("I have saved")',
     'button:has-text("已保存")',
+)
+# 第二步：点击 Done 完成 2FA（这是最终确认步骤）
+SEL_RECOVERY_DONE_SELECTORS = (
+    'button:has-text("Done")',
     'button:has-text("完成")',
+    'a:has-text("Done")',
 )
 
 SEL_RECOVERY_DOWNLOAD_SELECTORS = (
@@ -1997,28 +2002,77 @@ async def run_enable_2fa_and_get_secret(
                 except Exception as e:
                     log(f"保存 recovery codes 文本失败: {e}")
 
-            # 点击确认已保存
+            # --- 第一步：点击「I have saved my recovery codes」 ---
             saved_clicked = await _human_click_first_visible_in_selector_list(
                 page,
-                SEL_RECOVERY_DONE_SELECTORS,
+                SEL_RECOVERY_SAVED_SELECTORS,
                 log,
                 label="已确认保存 recovery codes",
             )
             if not saved_clicked:
                 try:
-                    done = page.get_by_role(
+                    saved_btn = page.get_by_role(
                         "button",
                         name=re.compile(r"I have saved my recovery codes", re.I),
                     ).first
-                    if await done.is_visible():
-                        await done.scroll_into_view_if_needed()
+                    if await saved_btn.is_visible():
+                        await saved_btn.scroll_into_view_if_needed()
                         await asyncio.sleep(random.uniform(0.3, 0.6))
-                        await done.click(timeout=20000)
+                        await saved_btn.click(timeout=20000)
+                        saved_clicked = True
                         log("已确认保存 recovery codes（role匹配）")
                 except Exception as e:
                     log(f"点击「已保存 recovery codes」失败: {e}")
 
-            log("2FA 启用流程完成")
+            if saved_clicked:
+                # 等待页面响应（出现 Done 按钮）
+                await _human_delay((1500, 3000))
+                try:
+                    await page.wait_for_load_state(LOAD_STATE_THEN, timeout=15000)
+                except Exception:
+                    pass
+
+            # --- 第二步：点击「Done」完成 2FA ---
+            log("查找 Done 按钮以完成 2FA...")
+            done_clicked = False
+
+            # 等待 Done 按钮出现（最多 20 秒）
+            for _ in range(10):
+                done_clicked = await _human_click_first_visible_in_selector_list(
+                    page,
+                    SEL_RECOVERY_DONE_SELECTORS,
+                    log,
+                    label="已点击 Done，2FA 启用完成",
+                )
+                if done_clicked:
+                    break
+                # 兜底：role 匹配
+                try:
+                    done_btn = page.get_by_role(
+                        "button", name=re.compile(r"^\s*Done\s*$", re.I)
+                    ).first
+                    if await done_btn.is_visible():
+                        await done_btn.scroll_into_view_if_needed()
+                        await asyncio.sleep(random.uniform(0.3, 0.6))
+                        await done_btn.click(timeout=20000)
+                        done_clicked = True
+                        log("已点击 Done（role匹配），2FA 启用完成")
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
+            if done_clicked:
+                # 等待 Done 点击的请求完成
+                try:
+                    await page.wait_for_load_state(LOAD_STATE_THEN, timeout=15000)
+                except Exception:
+                    pass
+                await _human_delay((1000, 2000))
+                log("2FA 启用流程完成（已确认 Done）")
+            else:
+                log("未找到 Done 按钮，2FA 可能未正确完成")
+
             return secret
 
         except Exception as e:

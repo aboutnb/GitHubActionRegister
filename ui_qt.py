@@ -117,10 +117,16 @@ class AccountsModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ForegroundRole:
             # 用“桌面 UX”常见颜色表达状态（轻量，不依赖暗色主题）
             s = row.status
-            if s in ("成功",):
+            if s in ("成功", "未开启2FA"):
                 return QtGui.QBrush(QtGui.QColor("#047857"))
             if s in ("失败",):
                 return QtGui.QBrush(QtGui.QColor("#b91c1c"))
+            if s in ("已注册",):
+                return QtGui.QBrush(QtGui.QColor("#9333ea"))
+            if s in ("用户名占用",):
+                return QtGui.QBrush(QtGui.QColor("#c2410c"))
+            if s in ("服务拒绝",):
+                return QtGui.QBrush(QtGui.QColor("#dc2626"))
             if s in ("进行中", "人机验证", "取码验证", "获取2FA"):
                 return QtGui.QBrush(QtGui.QColor("#1d4ed8"))
             if s in ("已跳过",):
@@ -597,7 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def run_all(self) -> None:
-        pending = [i for i, a in enumerate(self.accounts) if a.get("status") in ("等待", "失败")]
+        pending = [i for i, a in enumerate(self.accounts) if a.get("status") in ("等待", "失败", "服务拒绝", "用户名占用")]
         if not pending:
             QtWidgets.QMessageBox.information(self, "提示", "没有等待注册或失败的账号")
             return

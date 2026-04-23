@@ -103,9 +103,13 @@ STATUS_CAPTCHA = "人机验证"
 STATUS_VERIFY = "取码验证"
 STATUS_2FA = "获取2FA"
 STATUS_SUCCESS = "成功"
+STATUS_NO_2FA = "未开启2FA"
 STATUS_PARTIAL = "部分完成"
 STATUS_FAILED = "失败"
 STATUS_SKIPPED = "已跳过"
+STATUS_REGISTERED = "已注册"
+STATUS_USERNAME_TAKEN = "用户名占用"
+STATUS_SERVICE_REFUSED = "服务拒绝"
 
 
 def _icon_rgba_rounded(size: int, source: Any) -> Any:
@@ -165,7 +169,7 @@ def _email_to_username(email: str, max_len: int = 20) -> str:
 
 
 def _profile_name(email: str) -> str:
-    return "github-reg-" + email.replace("@", "-")[:20]
+    return email.replace("@", "-")[:20]
 
 
 def _cdp_ws(open_result: dict) -> str:
@@ -295,8 +299,8 @@ def _failed_log_batch_start(account_count: int) -> None:
 
 def _append_failed_account_plain(*, raw_line: str, fallback_email: str = "", fallback_password: str = "") -> None:
     """
-    纯净失败账号导出：严格按“导入原始整行”输出（一行一个），不夹杂任何日志内容。
-    线程安全，允许重复追加（便于多轮批次追溯）。
+    纯净失败账号导出：严格按导入原始整行输出（一行一个），不夹杂任何日志内容。
+    线程安全；写入前按整行或邮箱去重（支持多轮批次同一批账号跑两遍的场景）。
     """
     raw = (raw_line or "").replace("\r", " ").replace("\n", " ").strip()
     if not raw:
@@ -305,7 +309,24 @@ def _append_failed_account_plain(*, raw_line: str, fallback_email: str = "", fal
         if not email or not password:
             return
         raw = f"{email}{SEP}{password}"
+    # 提取邮箱用于去重
+    email_for_dedup = raw.split(SEP)[0].strip() if SEP in raw else raw.strip()
     with _FAILED_FILE_LOCK:
+        # 去重：整行匹配 或 邮箱匹配则跳过写入
+        if os.path.isfile(FAILED_ACCOUNTS_FILE):
+            try:
+                with open(FAILED_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                    for existing_line in f:
+                        existing_line = existing_line.strip()
+                        if not existing_line:
+                            continue
+                        if existing_line == raw:
+                            return
+                        existing_email = existing_line.split(SEP)[0].strip() if SEP in existing_line else ""
+                        if existing_email and existing_email == email_for_dedup:
+                            return
+            except Exception:
+                pass
         with open(FAILED_ACCOUNTS_FILE, "a", encoding="utf-8") as f:
             f.write(raw + "\n")
 
@@ -405,11 +426,15 @@ def _run_single_account(
                 _append_failed_record(
                     email, "邮箱已被注册", mode_label=mode_label, stage="注册提交"
                 )
+                on_status(STATUS_REGISTERED)
+                # 已注册账号不可重试，不写入纯净失败列表
             elif "username_taken" in e.errors:
                 log(f"[{email}] 用户名已被占用，跳过此账号")
                 _append_failed_record(
                     email, "用户名已被占用", mode_label=mode_label, stage="注册提交"
                 )
+                on_status(STATUS_USERNAME_TAKEN)
+                export_failed_plain = True
             elif "signup_unavailable" in e.errors:
                 log(f"[{email}] GitHub 无法创建账号（服务拒绝），跳过此账号")
                 _append_failed_record(
@@ -418,13 +443,15 @@ def _run_single_account(
                     mode_label=mode_label,
                     stage="注册提交",
                 )
+                on_status(STATUS_SERVICE_REFUSED)
+                export_failed_plain = True
             else:
                 log(f"[{email}] 表单校验失败: {e}，跳过此账号")
                 _append_failed_record(
                     email, f"表单校验失败: {e}", mode_label=mode_label, stage="注册提交"
                 )
-            on_status(STATUS_FAILED)
-            export_failed_plain = True
+                on_status(STATUS_FAILED)
+                export_failed_plain = True
             return "failed"
         if not ok:
             raise RuntimeError("自动注册流程失败")
@@ -452,7 +479,7 @@ def _run_single_account(
                     mode_label=mode_label,
                     stage="人机验证",
                 )
-                on_status(STATUS_FAILED)
+                on_status(STATUS_SERVICE_REFUSED)
                 export_failed_plain = True
                 return "failed"
             raise
@@ -542,17 +569,11 @@ def _run_single_account(
             result_status = "success"
             return "success"
         else:
-            log(f"[{email}] 未能获取 2FA 密钥（可能需要手动完成）")
+            log(f"[{email}] 注册成功，但未能开启 2FA（可能需要手动完成）")
             _append_output(f"{email}---{final_pw}---NO_2FA")
-            _append_failed_record(
-                email,
-                "未获取2FA密钥（页面需手动完成或选择器不匹配）",
-                mode_label=mode_label,
-                stage="2FA",
-            )
-            on_status(STATUS_PARTIAL)
-            result_status = "partial"
-            return "partial"
+            on_status(STATUS_NO_2FA)
+            result_status = "success"
+            return "success"
 
     except Exception as e:
         log(f"[{email}] 流程失败: {e}")
@@ -585,8 +606,23 @@ def _run_single_account(
         if profile_id:
             try:
                 if result_status == "failed":
-                    delete_browser(profile_id)
-                    log(f"[{email}] 注册失败，已删除 BitBrowser 窗口")
+                    # 先关闭浏览器窗口，再删除档案（提高删除成功率）
+                    try:
+                        close_browser(profile_id)
+                        time.sleep(2)
+                    except Exception:
+                        pass
+                    try:
+                        delete_browser(profile_id)
+                        log(f"[{email}] 注册失败，已删除 BitBrowser 窗口")
+                    except Exception as ex1:
+                        log(f"[{email}] 首次删除窗口失败: {ex1}，3s 后重试...")
+                        time.sleep(3)
+                        try:
+                            delete_browser(profile_id)
+                            log(f"[{email}] 重试删除成功")
+                        except Exception as ex2:
+                            log(f"[{email}] 重试删除仍失败: {ex2}")
                 else:
                     close_browser(profile_id)
                     log(f"[{email}] 已关闭 BitBrowser 窗口")
