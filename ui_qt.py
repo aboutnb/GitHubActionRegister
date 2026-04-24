@@ -206,6 +206,7 @@ class MainWindow(QtWidgets.QMainWindow):
         run_one: Callable[[dict[str, Any], Callable[[str], None], Callable[[str], None], Callable[[], bool]], str],
         open_output: Callable[[], None],
         failed_batch_start: Callable[[int], None],
+        deduplicate_failed: Callable[[], int],
     ):
         super().__init__()
         self.setWindowTitle(window_title)
@@ -222,6 +223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_one = run_one
         self._open_output_cb = open_output
         self._failed_batch_start = failed_batch_start
+        self._deduplicate_failed = deduplicate_failed
 
         self.accounts: list[dict[str, Any]] = []
         self._rows: list[AccountRow] = []
@@ -278,6 +280,10 @@ class MainWindow(QtWidgets.QMainWindow):
         act_open_failed_plain = QtGui.QAction("打开失败账号", self)
         act_open_failed_plain.triggered.connect(self.open_failed_accounts_plain)
         tb.addAction(act_open_failed_plain)
+
+        act_dedup = QtGui.QAction("清理已成功", self)
+        act_dedup.triggered.connect(self.deduplicate_accounts)
+        tb.addAction(act_dedup)
 
         # 状态栏：桌面 UX 的“持续反馈”
         self.statusBar().showMessage("就绪")
@@ -730,6 +736,21 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "尚无失败账号导出文件")
 
     @QtCore.Slot()
+    def deduplicate_accounts(self, silent: bool = False) -> None:
+        try:
+            n = self._deduplicate_failed()
+            if not silent:
+                if n > 0:
+                    self.append_log(f">>> 清理完成：从失败列表中移除了 {n} 个已成功的账号")
+                    QtWidgets.QMessageBox.information(self, "清理完成", f"已从失败列表中移除 {n} 个已成功的账号")
+                else:
+                    self.append_log(">>> 清理完成：失败列表中未发现已成功的账号")
+                    QtWidgets.QMessageBox.information(self, "清理完成", "失败列表中未发现已成功的账号")
+        except Exception as e:
+            if not silent:
+                QtWidgets.QMessageBox.warning(self, "清理失败", str(e))
+
+    @QtCore.Slot()
     def _rebuild_log_view(self) -> None:
         self.log_view.clear()
         for msg in self._log_buffer:
@@ -758,6 +779,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_step.setText("")
         self.statusBar().showMessage(f"本轮结束 · 成功 {success} · 失败 {fail}")
         self.append_log(f"\n任务完成。成功: {success}，失败: {fail}")
+        # 任务结束后自动执行一次清理
+        self.deduplicate_accounts(silent=True)
 
 
 def run_qt_app(
@@ -770,6 +793,7 @@ def run_qt_app(
     run_one: Callable[[dict[str, Any], Callable[[str], None], Callable[[str], None], Callable[[], bool]], str],
     open_output: Callable[[], None],
     failed_batch_start: Callable[[int], None],
+    deduplicate_failed: Callable[[], int],
 ) -> int:
     app = QtWidgets.QApplication(sys.argv)
     apply_light_desktop_palette(app)
@@ -783,7 +807,7 @@ def run_qt_app(
         run_one=run_one,
         open_output=open_output,
         failed_batch_start=failed_batch_start,
+        deduplicate_failed=deduplicate_failed,
     )
     win.show()
     return app.exec()
-

@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -60,6 +61,55 @@ UI_PREFS_FILE = os.path.join(APP_ROOT, ".ui_prefs.json")
 # failed.txt：制表符分隔，可用 Excel「数据-分列」；首行为表头（仅文件为空时写入一次）
 FAILED_FILE_HEADER = "时间\t取件方式\t阶段\t邮箱\t原因\n"
 _FAILED_FILE_LOCK = threading.Lock()
+
+
+def _get_success_emails() -> set[str]:
+    """从 ok.txt 和 output.txt 中提取所有成功注册的邮箱。"""
+    emails = set()
+    for path in [OUTPUT_FILE, os.path.join(APP_ROOT, "ok.txt")]:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # 分割符可能是 --- 或 ----
+                        parts = re.split(r"---+", line)
+                        if parts and "@" in parts[0]:
+                            emails.add(parts[0].strip())
+            except Exception:
+                pass
+    return emails
+
+
+def deduplicate_failed_accounts() -> int:
+    """从 failed_accounts.txt 中移除已经在成功列表中的账号。"""
+    success_emails = _get_success_emails()
+    if not os.path.isfile(FAILED_ACCOUNTS_FILE):
+        return 0
+
+    remaining_lines = []
+    removed_count = 0
+    with _FAILED_FILE_LOCK:
+        try:
+            with open(FAILED_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    parts = re.split(r"---+", raw)
+                    email = parts[0].strip() if parts else ""
+                    if email and email in success_emails:
+                        removed_count += 1
+                        continue
+                    remaining_lines.append(line)
+
+            with open(FAILED_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+                f.writelines(remaining_lines)
+        except Exception:
+            pass
+    return removed_count
 
 
 def _failed_file_has_tsv_header(path: str) -> bool:
@@ -311,6 +361,12 @@ def _append_failed_account_plain(*, raw_line: str, fallback_email: str = "", fal
         raw = f"{email}{SEP}{password}"
     # 提取邮箱用于去重
     email_for_dedup = raw.split(SEP)[0].strip() if SEP in raw else raw.strip()
+
+    # 如果该邮箱已经成功，则不写入失败列表
+    success_emails = _get_success_emails()
+    if email_for_dedup in success_emails:
+        return
+
     with _FAILED_FILE_LOCK:
         # 去重：整行匹配 或 邮箱匹配则跳过写入
         if os.path.isfile(FAILED_ACCOUNTS_FILE):
@@ -652,5 +708,6 @@ if __name__ == "__main__":
             run_one=_run_single_account,
             open_output=_open_output_ui,
             failed_batch_start=_failed_log_batch_start,
+            deduplicate_failed=deduplicate_failed_accounts,
         )
     )
