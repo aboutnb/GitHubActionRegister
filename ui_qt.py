@@ -10,7 +10,147 @@ from typing import Any, Callable, Optional
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
-UI_PREFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ui_prefs.json")
+class ProxySettingsDialog(QtWidgets.QDialog):
+    def __init__(self, parent: Optional[QtWidgets.QWidget], current_cfg: dict[str, str], test_cb: Callable[[dict[str, str]], tuple[bool, str]], test_bb_cb: Callable[[], tuple[bool, str]]):
+        super().__init__(parent)
+        self.setWindowTitle("系统设置")
+        self.setMinimumWidth(450)
+        self._test_cb = test_cb
+        self._test_bb_cb = test_bb_cb
+        self._init_ui(current_cfg)
+
+    def _init_ui(self, cfg: dict[str, str]) -> None:
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(15)
+
+        # 代理设置分组
+        proxy_group = QtWidgets.QGroupBox("代理配置")
+        proxy_layout = QtWidgets.QFormLayout(proxy_group)
+        proxy_layout.setSpacing(10)
+
+        self.cb_type = QtWidgets.QComboBox()
+        self.cb_type.addItems(["http", "socks5"])
+        self.cb_type.setCurrentText(cfg.get("proxyType", "http"))
+        proxy_layout.addRow("代理类型：", self.cb_type)
+
+        self.ed_host = QtWidgets.QLineEdit(cfg.get("proxyHost", ""))
+        self.ed_host.setPlaceholderText("例如：127.0.0.1 或 代理域名")
+        proxy_layout.addRow("服务器地址：", self.ed_host)
+
+        self.ed_port = QtWidgets.QLineEdit(cfg.get("proxyPort", ""))
+        self.ed_port.setPlaceholderText("例如：8080")
+        proxy_layout.addRow("端口：", self.ed_port)
+
+        self.ed_user = QtWidgets.QLineEdit(cfg.get("proxyUser", ""))
+        self.ed_user.setPlaceholderText("选填")
+        proxy_layout.addRow("用户名：", self.ed_user)
+
+        self.ed_pass = QtWidgets.QLineEdit(cfg.get("proxyPass", ""))
+        self.ed_pass.setPlaceholderText("选填")
+        self.ed_pass.setEchoMode(QtWidgets.QLineEdit.Password)
+        proxy_layout.addRow("密码：", self.ed_pass)
+
+        self.btn_test_proxy = QtWidgets.QPushButton("测试代理连接")
+        self.btn_test_proxy.clicked.connect(self._on_test_proxy)
+        proxy_layout.addRow("", self.btn_test_proxy)
+
+        layout.addWidget(proxy_group)
+
+        # BitBrowser 设置分组
+        bb_group = QtWidgets.QGroupBox("BitBrowser 配置")
+        bb_layout = QtWidgets.QFormLayout(bb_group)
+        bb_layout.setSpacing(10)
+
+        self.ed_bb_url = QtWidgets.QLineEdit(cfg.get("bitbrowserUrl", "http://127.0.0.1:54345"))
+        self.ed_bb_url.setPlaceholderText("例如：http://127.0.0.1:54345")
+        bb_layout.addRow("API 地址：", self.ed_bb_url)
+
+        self.ed_bb_key = QtWidgets.QLineEdit(cfg.get("bitbrowserKey", ""))
+        self.ed_bb_key.setPlaceholderText("BitBrowser API Key")
+        bb_layout.addRow("API Key：", self.ed_bb_key)
+
+        self.btn_test_bb = QtWidgets.QPushButton("检测 BitBrowser 服务")
+        self.btn_test_bb.clicked.connect(self._on_test_bb)
+        bb_layout.addRow("", self.btn_test_bb)
+
+        layout.addWidget(bb_group)
+
+        # 底部按钮
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.btn_save = QtWidgets.QPushButton("保存设置")
+        self.btn_save.setMinimumWidth(100)
+        self.btn_save.setDefault(True)
+        self.btn_save.clicked.connect(self.accept)
+        btn_layout.addWidget(self.btn_save)
+
+        self.btn_cancel = QtWidgets.QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(self.btn_cancel)
+
+        layout.addLayout(btn_layout)
+
+    def _on_test_proxy(self) -> None:
+        cfg = self.get_config()
+        if not cfg["proxyHost"] or not cfg["proxyPort"]:
+            QtWidgets.QMessageBox.warning(self, "提示", "请填写完整的代理地址和端口")
+            return
+
+        self.btn_test_proxy.setEnabled(False)
+        self.btn_test_proxy.setText("正在测试...")
+        QtCore.QCoreApplication.processEvents()
+
+        ok, msg = self._test_cb(cfg)
+        self.btn_test_proxy.setEnabled(True)
+        self.btn_test_proxy.setText("测试代理连接")
+
+        if ok:
+            QtWidgets.QMessageBox.information(self, "代理测试成功", msg)
+        else:
+            QtWidgets.QMessageBox.critical(self, "代理测试失败", msg)
+
+    def _on_test_bb(self) -> None:
+        # 在测试前先临时保存当前输入的 BB 配置到内存（不持久化），以便测试函数能获取到
+        # 注意：这里我们假设 test_bb_cb 会调用 check_bitbrowser_alive，
+        # 而 check_bitbrowser_alive 依赖 get_bitbrowser_config。
+        # 为了让测试反映当前输入框的值，我们需要一个中间层。
+        # 但由于 test_bb_cb 是在 MainWindow 中定义的，我们可以通过它传递。
+        
+        self.btn_test_bb.setEnabled(False)
+        self.btn_test_bb.setText("正在检测...")
+        QtCore.QCoreApplication.processEvents()
+        
+        # 我们直接调用 check_bitbrowser_alive 的逻辑，但使用当前输入框的值
+        # 为了保持 ui_qt 的纯净，我们让 MainWindow 处理
+        ok, msg = self._test_bb_cb()
+        
+        self.btn_test_bb.setEnabled(True)
+        self.btn_test_bb.setText("检测 BitBrowser 服务")
+        
+        if ok:
+            QtWidgets.QMessageBox.information(self, "BitBrowser 正常", msg)
+        else:
+            QtWidgets.QMessageBox.critical(self, "BitBrowser 异常", msg)
+
+    def get_config(self) -> dict[str, str]:
+        return {
+            "proxyType": self.cb_type.currentText(),
+            "proxyHost": self.ed_host.text().strip(),
+            "proxyPort": self.ed_port.text().strip(),
+            "proxyUser": self.ed_user.text().strip(),
+            "proxyPass": self.ed_pass.text().strip(),
+            "bitbrowserUrl": self.ed_bb_url.text().strip(),
+            "bitbrowserKey": self.ed_bb_key.text().strip(),
+        }
+
+
+def _get_base_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+UI_PREFS_FILE = os.path.join(_get_base_path(), ".ui_prefs.json")
 
 
 def _load_ui_prefs() -> dict[str, Any]:
@@ -207,6 +347,11 @@ class MainWindow(QtWidgets.QMainWindow):
         open_output: Callable[[], None],
         failed_batch_start: Callable[[int], None],
         deduplicate_failed: Callable[[], int],
+        get_proxy_cfg: Callable[[], dict[str, str]],
+        save_proxy_cfg: Callable[[dict[str, str]], None],
+        test_proxy_conn: Callable[[dict[str, str]], tuple[bool, str]],
+        test_bb_conn: Callable[[], tuple[bool, str]],
+        icon_path: Optional[str] = None,
     ):
         super().__init__()
         self.setWindowTitle(window_title)
@@ -214,6 +359,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # 相比之前更紧凑（约 70–80%），但仍保证表格/按钮/日志好用
         self.resize(980, 720)
         self.setMinimumSize(900, 640)
+        
+        if icon_path and os.path.exists(icon_path):
+            self.setWindowIcon(QtGui.QIcon(icon_path))
 
         self._prefs = _load_ui_prefs()
         self._output_file = output_file
@@ -224,6 +372,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._open_output_cb = open_output
         self._failed_batch_start = failed_batch_start
         self._deduplicate_failed = deduplicate_failed
+        self._get_proxy_cfg = get_proxy_cfg
+        self._save_proxy_cfg = save_proxy_cfg
+        self._test_proxy_conn = test_proxy_conn
+        self._test_bb_conn = test_bb_conn
 
         self.accounts: list[dict[str, Any]] = []
         self._rows: list[AccountRow] = []
@@ -284,6 +436,11 @@ class MainWindow(QtWidgets.QMainWindow):
         act_dedup = QtGui.QAction("清理已成功", self)
         act_dedup.triggered.connect(self.deduplicate_accounts)
         tb.addAction(act_dedup)
+
+        tb.addSeparator()
+        act_proxy = QtGui.QAction("系统设置", self)
+        act_proxy.triggered.connect(self.show_proxy_settings)
+        tb.addAction(act_proxy)
 
         # 状态栏：桌面 UX 的“持续反馈”
         self.statusBar().showMessage("就绪")
@@ -751,6 +908,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "清理失败", str(e))
 
     @QtCore.Slot()
+    def show_proxy_settings(self) -> None:
+        # 获取包含代理和 BB 的完整配置
+        current = self._get_proxy_cfg()
+        
+        def _test_bb_with_current_ui():
+            # 这里特殊处理：由于 check_bitbrowser_alive 会读取 config.json，
+            # 我们需要在测试前先保存当前的输入（临时或持久化）。
+            # 为了简单起见，我们让用户知道测试的是“当前已填写的”配置。
+            # 这里我们通过对话框直接获取当前值并保存
+            if hasattr(self, '_active_settings_dialog'):
+                new_cfg = self._active_settings_dialog.get_config()
+                self._save_proxy_cfg(new_cfg)
+            return self._test_bb_conn()
+
+        dlg = ProxySettingsDialog(self, current, self._test_proxy_conn, _test_bb_with_current_ui)
+        self._active_settings_dialog = dlg
+        if dlg.exec() == QtWidgets.QDialog.Accepted:
+            new_cfg = dlg.get_config()
+            self._save_proxy_cfg(new_cfg)
+            self.append_log(">>> 系统设置已保存")
+            QtWidgets.QMessageBox.information(self, "设置已保存", "新的代理与 BitBrowser 配置已生效。")
+        self._active_settings_dialog = None
+
+    @QtCore.Slot()
     def _rebuild_log_view(self) -> None:
         self.log_view.clear()
         for msg in self._log_buffer:
@@ -794,9 +975,17 @@ def run_qt_app(
     open_output: Callable[[], None],
     failed_batch_start: Callable[[int], None],
     deduplicate_failed: Callable[[], int],
+    get_proxy_cfg: Callable[[], dict[str, str]],
+    save_proxy_cfg: Callable[[dict[str, str]], None],
+    test_proxy_conn: Callable[[dict[str, str]], tuple[bool, str]],
+    test_bb_conn: Callable[[], tuple[bool, str]],
+    **kwargs: Any,
 ) -> int:
     app = QtWidgets.QApplication(sys.argv)
     apply_light_desktop_palette(app)
+    
+    if kwargs.get("icon_path") and os.path.exists(kwargs["icon_path"]):
+        app.setWindowIcon(QtGui.QIcon(kwargs["icon_path"]))
 
     win = MainWindow(
         window_title=window_title,
@@ -808,6 +997,11 @@ def run_qt_app(
         open_output=open_output,
         failed_batch_start=failed_batch_start,
         deduplicate_failed=deduplicate_failed,
+        get_proxy_cfg=get_proxy_cfg,
+        save_proxy_cfg=save_proxy_cfg,
+        test_proxy_conn=test_proxy_conn,
+        test_bb_conn=test_bb_conn,
+        icon_path=kwargs.get("icon_path"),
     )
     win.show()
     return app.exec()

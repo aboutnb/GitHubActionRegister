@@ -7,10 +7,18 @@ import asyncio
 import os
 import random
 import re
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Optional
+
+
+def _get_base_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 # ---------------------------------------------------------------------------
 # 配置常量：延迟与超时（放慢并加大随机，降低「异常活动」判定）
@@ -1910,9 +1918,7 @@ async def run_enable_2fa_and_get_secret(
 
             # -- 步骤 6: 处理 recovery codes 页面 --
             # 先触发 Download 并保存，再点击 "I have saved my recovery codes" / "Done"
-            recovery_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "recovery_codes"
-            )
+            recovery_dir = os.path.join(_get_base_path(), "recovery_codes")
             os.makedirs(recovery_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             email_part = _safe_email_for_filename(email)

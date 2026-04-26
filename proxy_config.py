@@ -5,22 +5,67 @@
 from __future__ import annotations
 
 import os
+import sys
+import json
 from typing import Any, Optional
 
 import requests
 
 # ---------------------------------------------------------------------------
-# 从环境变量读取代理配置（可在 .env / .env.local 中设置）
+# 获取可执行文件所在目录（兼容打包后与开发环境）
 # ---------------------------------------------------------------------------
+def _get_base_path():
+    if getattr(sys, 'frozen', False):
+        # 打包后的可执行文件所在目录
+        return os.path.dirname(sys.executable)
+    # 开发环境代码所在目录
+    return os.path.dirname(os.path.abspath(__file__))
 
-PROXY_HOST = os.environ.get("PROXY_HOST", "")
-PROXY_PORT = os.environ.get("PROXY_PORT", "")
-PROXY_USER = os.environ.get("PROXY_USER", "")
-PROXY_PASS = os.environ.get("PROXY_PASS", "")
-PROXY_TYPE = os.environ.get("PROXY_TYPE", "http")  # http / socks5
-
+BASE_PATH = _get_base_path()
 IPINFO_URL = "https://ipinfo.io/"
 REQUEST_TIMEOUT = 15
+CONFIG_FILE = os.path.join(BASE_PATH, "config.json")
+
+
+def load_config() -> dict[str, str]:
+    """从 config.json 加载代理配置。"""
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(config: dict[str, str]) -> None:
+    """将配置保存到 config.json。"""
+    try:
+        current = load_config()
+        # 更新代理和 BitBrowser 字段
+        current.update({
+            "proxyHost": config.get("proxyHost", ""),
+            "proxyPort": config.get("proxyPort", ""),
+            "proxyUser": config.get("proxyUser", ""),
+            "proxyPass": config.get("proxyPass", ""),
+            "proxyType": config.get("proxyType", "http"),
+            "bitbrowserUrl": config.get("bitbrowserUrl", "http://127.0.0.1:54345"),
+            "bitbrowserKey": config.get("bitbrowserKey", ""),
+        })
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(current, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_bitbrowser_config() -> tuple[str, str]:
+    """获取 BitBrowser API 配置：(url, key)"""
+    file_cfg = load_config()
+    url = file_cfg.get("bitbrowserUrl") or os.environ.get("BITBROWSER_BASE_URL", "http://127.0.0.1:54345")
+    key = file_cfg.get("bitbrowserKey") or os.environ.get("BITBROWSER_API_KEY", "")
+    return url, key
 
 
 def get_proxy_config(
@@ -31,16 +76,17 @@ def get_proxy_config(
     proxy_type: Optional[str] = None,
 ) -> dict[str, str]:
     """
-    获取代理配置，优先使用传入参数，其次使用环境变量。
+    获取代理配置，优先级：传入参数 > config.json > 环境变量。
     返回统一格式的 dict:
       {"proxyHost", "proxyPort", "proxyUser", "proxyPass", "proxyType"}
     """
+    file_cfg = load_config()
     return {
-        "proxyHost": host or PROXY_HOST,
-        "proxyPort": port or PROXY_PORT,
-        "proxyUser": user or PROXY_USER,
-        "proxyPass": password or PROXY_PASS,
-        "proxyType": proxy_type or PROXY_TYPE,
+        "proxyHost": host or file_cfg.get("proxyHost") or os.environ.get("PROXY_HOST", ""),
+        "proxyPort": port or file_cfg.get("proxyPort") or os.environ.get("PROXY_PORT", ""),
+        "proxyUser": user or file_cfg.get("proxyUser") or os.environ.get("PROXY_USER", ""),
+        "proxyPass": password or file_cfg.get("proxyPass") or os.environ.get("PROXY_PASS", ""),
+        "proxyType": proxy_type or file_cfg.get("proxyType") or os.environ.get("PROXY_TYPE", "http"),
     }
 
 
@@ -97,32 +143,23 @@ def check_proxy_ip(config: Optional[dict[str, str]] = None) -> dict[str, Any]:
 
 def test_proxy_connectivity(
     config: Optional[dict[str, str]] = None,
-    timeout: int = 10,
+    timeout: int = 15,
 ) -> tuple[bool, str]:
     """
-    快速检测代理是否可用（通过代理访问 github.com）。
-
-    :return: (ok, message)  ok=True 代理正常, ok=False 附带错误信息
+    通过代理获取出口 IP，验证代理是否真正生效。
+    :return: (ok, message)
     """
-    cfg = config or get_proxy_config()
-    if not is_proxy_configured(cfg):
-        return True, "未配置代理，直连"
-    proxy_url = build_proxy_url(cfg)
-    proxies = {"http": proxy_url, "https": proxy_url}
     try:
-        resp = requests.head(
-            "https://github.com",
-            proxies=proxies,
-            timeout=timeout,
-            allow_redirects=True,
-        )
-        return True, f"代理可用（HTTP {resp.status_code}）"
+        info = check_proxy_ip(config)
+        ip = info.get("ip", "未知")
+        country = info.get("country", "")
+        city = info.get("city", "")
+        loc_str = f" ({city}, {country})" if country else ""
+        return True, f"测试成功！出口 IP: {ip}{loc_str}"
     except requests.exceptions.ProxyError as e:
         return False, f"代理连接失败: {e}"
     except requests.exceptions.ConnectTimeout:
         return False, f"代理连接超时（{timeout}s）"
-    except requests.exceptions.SSLError as e:
-        return False, f"代理 TLS 错误: {e}"
     except Exception as e:
         if "Missing dependencies for SOCKS support" in str(e):
             return False, "缺少 SOCKS 依赖：请安装 PySocks（pip install pysocks）"

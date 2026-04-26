@@ -11,10 +11,15 @@ import queue
 import re
 import subprocess
 import sys
+import multiprocessing
 import threading
 import time
 from datetime import datetime
 from typing import Any, Callable, Optional, Tuple
+
+# 这一行必须在所有其他初始化之前调用，解决打包后的闪现重启问题
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 
 from ui_qt import run_qt_app
 
@@ -23,7 +28,8 @@ from ui_qt import run_qt_app
 # ---------------------------------------------------------------------------
 try:
     from dotenv import load_dotenv
-    _base = os.path.dirname(os.path.abspath(__file__))
+    # 打包后不自动加载 .env，除非它放在 EXE 目录下
+    _base = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
     load_dotenv(os.path.join(_base, ".env"))
     load_dotenv(os.path.join(_base, ".env.local"), override=True)
 except ImportError:
@@ -39,6 +45,12 @@ from bitbrower import (
 )
 from github_automation import SignupFormError
 from xiaoshuidi_mail import get_verification_info as xsd_get_verify
+from proxy_config import (
+    get_proxy_config,
+    save_config as save_proxy_config,
+    test_proxy_connectivity,
+    to_bitbrowser_proxy,
+)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -52,7 +64,12 @@ POLL_RETRY_INTERVAL = 5
 POLL_RETRY_MAX = 12
 RETRY_BACKOFF = (5, 10, 20)
 
-APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+def _get_base_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+APP_ROOT = _get_base_path()
 OUTPUT_FILE = os.path.join(APP_ROOT, "output.txt")
 FAILED_FILE = os.path.join(APP_ROOT, "failed.txt")
 # 纯净失败账号导出（仅 邮箱----密码；不含任何日志/时间/原因/批次分隔）
@@ -121,7 +138,13 @@ def _failed_file_has_tsv_header(path: str) -> bool:
             if line.startswith("时间\t"):
                 return True
     return False
-ICON_PATH = os.path.join(APP_ROOT, "assets", "icon.png")
+def _get_resource_path(relative_path):
+    """ 获取资源绝对路径（兼容开发与打包后的 _MEIPASS） """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
+ICON_PATH = _get_resource_path(os.path.join("assets", "icon.png"))
 
 WINDOW_TITLE = "GitHub Register"
 # Qt 版本由 ui_qt 控制窗口尺寸；这里保留常量给业务/显示文案使用
@@ -430,8 +453,15 @@ def _run_single_account(
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 log(f"[{email}] 创建并打开浏览器... ({attempt}/{MAX_RETRIES})")
+                
+                # 获取当前最新的代理配置
+                proxy_cfg = get_proxy_config()
+                bit_proxy = to_bitbrowser_proxy(proxy_cfg)
+                
                 profile = create_github_ready_browser(
-                    _profile_name(email), platform="https://github.com"
+                    _profile_name(email), 
+                    platform="https://github.com",
+                    proxy_settings=bit_proxy
                 )
                 profile_id = profile.get("id", "")
                 if not profile_id:
@@ -697,17 +727,24 @@ def _open_output_ui() -> None:
         print("提示：尚无导出文件")
 
 
-if __name__ == "__main__":
-    raise SystemExit(
-        run_qt_app(
-            window_title=WINDOW_TITLE,
-            output_file=OUTPUT_FILE,
-            failed_file=FAILED_FILE,
-            failed_accounts_file=FAILED_ACCOUNTS_FILE,
-            parse_mail_line=_parse_mail_line,
-            run_one=_run_single_account,
-            open_output=_open_output_ui,
-            failed_batch_start=_failed_log_batch_start,
-            deduplicate_failed=deduplicate_failed_accounts,
-        )
+def main():
+    return run_qt_app(
+        window_title=WINDOW_TITLE,
+        output_file=OUTPUT_FILE,
+        failed_file=FAILED_FILE,
+        failed_accounts_file=FAILED_ACCOUNTS_FILE,
+        parse_mail_line=_parse_mail_line,
+        run_one=_run_single_account,
+        open_output=_open_output_ui,
+        failed_batch_start=_failed_log_batch_start,
+        deduplicate_failed=deduplicate_failed_accounts,
+        get_proxy_cfg=get_proxy_config,
+        save_proxy_cfg=save_proxy_config,
+        test_proxy_conn=test_proxy_connectivity,
+        test_bb_conn=check_bitbrowser_alive,
+        icon_path=ICON_PATH, # 传递图标路径
     )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

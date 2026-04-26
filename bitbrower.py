@@ -22,7 +22,7 @@ from typing import Any, Callable, Optional
 
 import requests
 
-from proxy_config import to_bitbrowser_proxy
+from proxy_config import to_bitbrowser_proxy, get_bitbrowser_config
 
 # ---------------------------------------------------------------------------
 # 环境变量（仅保留确有必要的开关）
@@ -41,8 +41,9 @@ def _env_bool(name: str, default: bool) -> bool:
 # 为 true 时打开窗口会加载扩展；GitHub 注册场景建议保持 false
 BITBROWSER_LOAD_EXTENSIONS = _env_bool("BITBROWSER_LOAD_EXTENSIONS", False)
 
-BITBROWSER_BASE_URL = os.environ.get("BITBROWSER_BASE_URL", "http://127.0.0.1:54345")
-BITBROWSER_API_KEY = os.environ.get("BITBROWSER_API_KEY", "ce09d101554e4383818d2da198c8f8fd")
+# 默认值
+DEFAULT_BASE_URL = "http://127.0.0.1:54345"
+DEFAULT_API_KEY = "ce09d101554e4383818d2da198c8f8fd"
 
 API_TIMEOUT = 30
 
@@ -74,8 +75,9 @@ def _to_bitbrowser_proxy(
 
 def _api_post(path: str, body: Optional[dict[str, Any]] = None) -> Any:
     """向 Bitbrowser 本地 API 发送 POST，body 为 JSON，带 x-api-key 鉴权。"""
-    url = f"{BITBROWSER_BASE_URL.rstrip('/')}{path}"
-    headers = {"x-api-key": BITBROWSER_API_KEY}
+    base_url, api_key = get_bitbrowser_config()
+    url = f"{base_url.rstrip('/')}{path}"
+    headers = {"x-api-key": api_key}
     resp = requests.post(url, json=body or {}, headers=headers, timeout=API_TIMEOUT)
     resp.raise_for_status()
     try:
@@ -176,7 +178,7 @@ def _platform_icon_from_url(platform: str) -> str:
 
 def create_github_ready_browser(
     name: str,
-    proxy_config: Optional[dict[str, Any]] = None,
+    proxy_settings: Optional[dict[str, Any]] = None,
     url: str = "",
     platform: str = "",
     os_type: str = "win",
@@ -207,7 +209,8 @@ def create_github_ready_browser(
         **_github_profile_side_options(workbench=workbench, sync_tabs=sync_tabs),
         **kwargs,
     }
-    body.update(_to_bitbrowser_proxy(proxy_config))
+    if proxy_settings:
+        body.update(proxy_settings)
     return _api_post("/browser/update", body)
 
 
@@ -245,8 +248,9 @@ def close_extra_tabs_after_open(
 def check_bitbrowser_alive() -> tuple[bool, str]:
     """检测 BitBrowser 本地服务是否在线。"""
     try:
-        url = f"{BITBROWSER_BASE_URL.rstrip('/')}/browser/list"
-        headers = {"x-api-key": BITBROWSER_API_KEY}
+        base_url, api_key = get_bitbrowser_config()
+        url = f"{base_url.rstrip('/')}/browser/list"
+        headers = {"x-api-key": api_key}
         resp = requests.post(url, json={"page": 0, "pageSize": 1}, headers=headers, timeout=5)
         resp.raise_for_status()
         data = resp.json()
