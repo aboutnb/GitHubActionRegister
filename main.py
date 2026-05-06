@@ -37,6 +37,7 @@ except ImportError:
 
 from bitbrower import (
     check_bitbrowser_alive,
+    check_bitbrowser_alive_with_config,
     close_browser,
     delete_browser,
     close_extra_tabs_after_open,
@@ -46,6 +47,7 @@ from bitbrower import (
 from github_automation import SignupFormError
 from xiaoshuidi_mail import get_verification_info as xsd_get_verify
 from proxy_config import (
+    get_app_config,
     get_proxy_config,
     save_config as save_proxy_config,
     test_proxy_connectivity,
@@ -78,6 +80,7 @@ UI_PREFS_FILE = os.path.join(APP_ROOT, ".ui_prefs.json")
 # failed.txt：制表符分隔，可用 Excel「数据-分列」；首行为表头（仅文件为空时写入一次）
 FAILED_FILE_HEADER = "时间\t取件方式\t阶段\t邮箱\t原因\n"
 _FAILED_FILE_LOCK = threading.Lock()
+_OUTPUT_FILE_LOCK = threading.Lock()
 
 
 def _get_success_emails() -> set[str]:
@@ -183,6 +186,14 @@ STATUS_SKIPPED = "已跳过"
 STATUS_REGISTERED = "已注册"
 STATUS_USERNAME_TAKEN = "用户名占用"
 STATUS_SERVICE_REFUSED = "服务拒绝"
+
+
+def _keep_window_statuses() -> set[str]:
+    cfg = get_app_config()
+    raw = cfg.get("keepWindowStatuses", [])
+    if isinstance(raw, list):
+        return {str(item).strip() for item in raw if str(item).strip()}
+    return set()
 
 
 def _icon_rgba_rounded(size: int, source: Any) -> Any:
@@ -338,8 +349,9 @@ def _ensure_browser(profile_id: str, current_ws: str, log: Callable[[str], None]
 # ---------------------------------------------------------------------------
 
 def _append_output(line: str) -> None:
-    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    with _OUTPUT_FILE_LOCK:
+        with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 def _append_failed_record(
@@ -432,12 +444,14 @@ def _run_single_account(
     profile_id = ""
     ws = ""
     result_status = "failed"
+    final_ui_status = STATUS_FAILED
     export_failed_plain = False
     raw_import_line = str(account.get("raw") or "")
 
     try:
         if cancel():
-            on_status(STATUS_SKIPPED)
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
             return "skipped"
 
         # 1. 前置检测 + 创建并打开浏览器
@@ -494,7 +508,8 @@ def _run_single_account(
         log(f"[{email}] 浏览器已打开")
 
         if cancel():
-            on_status(STATUS_SKIPPED)
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
             return "skipped"
 
         # 2. 自动注册
@@ -512,14 +527,16 @@ def _run_single_account(
                 _append_failed_record(
                     email, "邮箱已被注册", mode_label=mode_label, stage="注册提交"
                 )
-                on_status(STATUS_REGISTERED)
+                final_ui_status = STATUS_REGISTERED
+                on_status(final_ui_status)
                 # 已注册账号不可重试，不写入纯净失败列表
             elif "username_taken" in e.errors:
                 log(f"[{email}] 用户名已被占用，跳过此账号")
                 _append_failed_record(
                     email, "用户名已被占用", mode_label=mode_label, stage="注册提交"
                 )
-                on_status(STATUS_USERNAME_TAKEN)
+                final_ui_status = STATUS_USERNAME_TAKEN
+                on_status(final_ui_status)
                 export_failed_plain = True
             elif "signup_unavailable" in e.errors:
                 log(f"[{email}] GitHub 无法创建账号（服务拒绝），跳过此账号")
@@ -529,21 +546,24 @@ def _run_single_account(
                     mode_label=mode_label,
                     stage="注册提交",
                 )
-                on_status(STATUS_SERVICE_REFUSED)
+                final_ui_status = STATUS_SERVICE_REFUSED
+                on_status(final_ui_status)
                 export_failed_plain = True
             else:
                 log(f"[{email}] 表单校验失败: {e}，跳过此账号")
                 _append_failed_record(
                     email, f"表单校验失败: {e}", mode_label=mode_label, stage="注册提交"
                 )
-                on_status(STATUS_FAILED)
+                final_ui_status = STATUS_FAILED
+                on_status(final_ui_status)
                 export_failed_plain = True
             return "failed"
         if not ok:
             raise RuntimeError("自动注册流程失败")
 
         if cancel():
-            on_status(STATUS_SKIPPED)
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
             return "skipped"
 
         # 3. 人机验证（当前默认不自动打码；在浏览器中手动完成后继续）
@@ -565,7 +585,8 @@ def _run_single_account(
                     mode_label=mode_label,
                     stage="人机验证",
                 )
-                on_status(STATUS_SERVICE_REFUSED)
+                final_ui_status = STATUS_SERVICE_REFUSED
+                on_status(final_ui_status)
                 export_failed_plain = True
                 return "failed"
             raise
@@ -573,7 +594,8 @@ def _run_single_account(
             raise RuntimeError("人机验证未通过（超时、验证码 401 拦截或未完成）")
 
         if cancel():
-            on_status(STATUS_SKIPPED)
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
             return "skipped"
 
         # 4. 取码 + 填入（链接 / 验证码由界面选择，不自动混试）
@@ -582,7 +604,8 @@ def _run_single_account(
         result, diag = _poll_verification(account, log, cancel)
 
         if cancel():
-            on_status(STATUS_SKIPPED)
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
             return "skipped"
 
         if result:
@@ -613,7 +636,8 @@ def _run_single_account(
             raise RuntimeError(f"取件失败: {diag}")
 
         if cancel():
-            on_status(STATUS_SKIPPED)
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
             return "skipped"
 
         # 5. 登录 GitHub
@@ -632,7 +656,8 @@ def _run_single_account(
             raise RuntimeError("GitHub 登录失败")
 
         if cancel():
-            on_status(STATUS_SKIPPED)
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
             return "skipped"
 
         # 6. 2FA
@@ -651,13 +676,15 @@ def _run_single_account(
             out_line = f"{email}---{final_pw}---{secret}"
             _append_output(out_line)
             log(f"[{email}] 注册成功！2FA 密钥已获取并导出")
-            on_status(STATUS_SUCCESS)
+            final_ui_status = STATUS_SUCCESS
+            on_status(final_ui_status)
             result_status = "success"
             return "success"
         else:
             log(f"[{email}] 注册成功，但未能开启 2FA（可能需要手动完成）")
             _append_output(f"{email}---{final_pw}---NO_2FA")
-            on_status(STATUS_NO_2FA)
+            final_ui_status = STATUS_NO_2FA
+            on_status(final_ui_status)
             result_status = "success"
             return "success"
 
@@ -674,7 +701,8 @@ def _run_single_account(
         elif "CDP" in err_s or "浏览器" in err_s or "BitBrowser" in err_s:
             stage_guess = "浏览器"
         _append_failed_record(email, err_s, mode_label=mode_label, stage=stage_guess)
-        on_status(STATUS_FAILED)
+        final_ui_status = STATUS_FAILED
+        on_status(final_ui_status)
         result_status = "failed"
         export_failed_plain = True
         return "failed"
@@ -691,7 +719,11 @@ def _run_single_account(
                 pass
         if profile_id:
             try:
-                if result_status == "failed":
+                keep_statuses = _keep_window_statuses()
+                keep_window = final_ui_status in keep_statuses
+                if keep_window:
+                    log(f"[{email}] 命中保留窗口策略（状态: {final_ui_status}），保留 BitBrowser 窗口")
+                else:
                     # 先关闭浏览器窗口，再删除档案（提高删除成功率）
                     try:
                         close_browser(profile_id)
@@ -700,7 +732,7 @@ def _run_single_account(
                         pass
                     try:
                         delete_browser(profile_id)
-                        log(f"[{email}] 注册失败，已删除 BitBrowser 窗口")
+                        log(f"[{email}] 已根据清理策略删除 BitBrowser 窗口（状态: {final_ui_status}）")
                     except Exception as ex1:
                         log(f"[{email}] 首次删除窗口失败: {ex1}，3s 后重试...")
                         time.sleep(3)
@@ -709,9 +741,6 @@ def _run_single_account(
                             log(f"[{email}] 重试删除成功")
                         except Exception as ex2:
                             log(f"[{email}] 重试删除仍失败: {ex2}")
-                else:
-                    close_browser(profile_id)
-                    log(f"[{email}] 已关闭 BitBrowser 窗口")
             except Exception as ex:
                 log(f"[{email}] 清理 BitBrowser 窗口失败: {ex}")
 
@@ -738,10 +767,11 @@ def main():
         open_output=_open_output_ui,
         failed_batch_start=_failed_log_batch_start,
         deduplicate_failed=deduplicate_failed_accounts,
+        get_app_cfg=get_app_config,
         get_proxy_cfg=get_proxy_config,
         save_proxy_cfg=save_proxy_config,
         test_proxy_conn=test_proxy_connectivity,
-        test_bb_conn=check_bitbrowser_alive,
+        test_bb_conn=check_bitbrowser_alive_with_config,
         icon_path=ICON_PATH, # 传递图标路径
     )
 

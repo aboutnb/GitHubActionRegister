@@ -25,9 +25,44 @@ BASE_PATH = _get_base_path()
 IPINFO_URL = "https://ipinfo.io/"
 REQUEST_TIMEOUT = 15
 CONFIG_FILE = os.path.join(BASE_PATH, "config.json")
+DEFAULT_BITBROWSER_URL = "http://127.0.0.1:54345"
+DEFAULT_THREAD_COUNT = 1
+DEFAULT_KEEP_WINDOW_STATUSES = ["未开启2FA"]
 
 
-def load_config() -> dict[str, str]:
+def _clean_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
+def _normalize_thread_count(value: Any, default: int = DEFAULT_THREAD_COUNT) -> int:
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return default
+    return max(1, min(32, count))
+
+
+def _normalize_keep_window_statuses(value: Any) -> list[str]:
+    if isinstance(value, list):
+        items = [str(v).strip() for v in value if str(v).strip()]
+    elif isinstance(value, str):
+        items = [part.strip() for part in value.split(",") if part.strip()]
+    else:
+        items = []
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            normalized.append(item)
+    return normalized
+
+
+def load_config() -> dict[str, Any]:
     """从 config.json 加载代理配置。"""
     if os.path.isfile(CONFIG_FILE):
         try:
@@ -40,19 +75,28 @@ def load_config() -> dict[str, str]:
     return {}
 
 
-def save_config(config: dict[str, str]) -> None:
-    """将配置保存到 config.json。"""
+def save_config(config: dict[str, Any]) -> None:
+    """将代理、BitBrowser 与运行配置保存到 config.json。"""
     try:
         current = load_config()
-        # 更新代理和 BitBrowser 字段
+        thread_count = _normalize_thread_count(
+            config.get("threadCount", current.get("threadCount", DEFAULT_THREAD_COUNT))
+        )
         current.update({
-            "proxyHost": config.get("proxyHost", ""),
-            "proxyPort": config.get("proxyPort", ""),
-            "proxyUser": config.get("proxyUser", ""),
-            "proxyPass": config.get("proxyPass", ""),
-            "proxyType": config.get("proxyType", "http"),
-            "bitbrowserUrl": config.get("bitbrowserUrl", "http://127.0.0.1:54345"),
-            "bitbrowserKey": config.get("bitbrowserKey", ""),
+            "proxyHost": _clean_str(config.get("proxyHost", "")),
+            "proxyPort": _clean_str(config.get("proxyPort", "")),
+            "proxyUser": _clean_str(config.get("proxyUser", "")),
+            "proxyPass": _clean_str(config.get("proxyPass", "")),
+            "proxyType": _clean_str(config.get("proxyType", "http"), "http"),
+            "bitbrowserUrl": _clean_str(
+                config.get("bitbrowserUrl", DEFAULT_BITBROWSER_URL),
+                DEFAULT_BITBROWSER_URL,
+            ),
+            "bitbrowserKey": _clean_str(config.get("bitbrowserKey", "")),
+            "threadCount": thread_count,
+            "keepWindowStatuses": _normalize_keep_window_statuses(
+                config.get("keepWindowStatuses", current.get("keepWindowStatuses", DEFAULT_KEEP_WINDOW_STATUSES))
+            ),
         })
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(current, f, ensure_ascii=False, indent=2)
@@ -60,11 +104,37 @@ def save_config(config: dict[str, str]) -> None:
         pass
 
 
-def get_bitbrowser_config() -> tuple[str, str]:
-    """获取 BitBrowser API 配置：(url, key)"""
+def get_app_config() -> dict[str, Any]:
+    """获取完整设置（代理 + BitBrowser + 运行配置）。"""
     file_cfg = load_config()
-    url = file_cfg.get("bitbrowserUrl") or os.environ.get("BITBROWSER_BASE_URL", "http://127.0.0.1:54345")
-    key = file_cfg.get("bitbrowserKey") or os.environ.get("BITBROWSER_API_KEY", "")
+    return {
+        "proxyHost": _clean_str(file_cfg.get("proxyHost") or os.environ.get("PROXY_HOST", "")),
+        "proxyPort": _clean_str(file_cfg.get("proxyPort") or os.environ.get("PROXY_PORT", "")),
+        "proxyUser": _clean_str(file_cfg.get("proxyUser") or os.environ.get("PROXY_USER", "")),
+        "proxyPass": _clean_str(file_cfg.get("proxyPass") or os.environ.get("PROXY_PASS", "")),
+        "proxyType": _clean_str(file_cfg.get("proxyType") or os.environ.get("PROXY_TYPE", "http"), "http"),
+        "bitbrowserUrl": _clean_str(
+            file_cfg.get("bitbrowserUrl") or os.environ.get("BITBROWSER_BASE_URL", DEFAULT_BITBROWSER_URL),
+            DEFAULT_BITBROWSER_URL,
+        ),
+        "bitbrowserKey": _clean_str(file_cfg.get("bitbrowserKey") or os.environ.get("BITBROWSER_API_KEY", "")),
+        "threadCount": _normalize_thread_count(file_cfg.get("threadCount", DEFAULT_THREAD_COUNT)),
+        "keepWindowStatuses": _normalize_keep_window_statuses(
+            file_cfg.get("keepWindowStatuses", DEFAULT_KEEP_WINDOW_STATUSES)
+        ),
+    }
+
+
+def get_bitbrowser_config(config: Optional[dict[str, Any]] = None) -> tuple[str, str]:
+    """获取 BitBrowser API 配置：(url, key)"""
+    merged = get_app_config()
+    if config:
+        merged.update({
+            "bitbrowserUrl": _clean_str(config.get("bitbrowserUrl"), merged["bitbrowserUrl"]),
+            "bitbrowserKey": _clean_str(config.get("bitbrowserKey"), merged["bitbrowserKey"]),
+        })
+    url = merged["bitbrowserUrl"]
+    key = merged["bitbrowserKey"]
     return url, key
 
 
@@ -80,13 +150,13 @@ def get_proxy_config(
     返回统一格式的 dict:
       {"proxyHost", "proxyPort", "proxyUser", "proxyPass", "proxyType"}
     """
-    file_cfg = load_config()
+    file_cfg = get_app_config()
     return {
-        "proxyHost": host or file_cfg.get("proxyHost") or os.environ.get("PROXY_HOST", ""),
-        "proxyPort": port or file_cfg.get("proxyPort") or os.environ.get("PROXY_PORT", ""),
-        "proxyUser": user or file_cfg.get("proxyUser") or os.environ.get("PROXY_USER", ""),
-        "proxyPass": password or file_cfg.get("proxyPass") or os.environ.get("PROXY_PASS", ""),
-        "proxyType": proxy_type or file_cfg.get("proxyType") or os.environ.get("PROXY_TYPE", "http"),
+        "proxyHost": _clean_str(host, _clean_str(file_cfg.get("proxyHost"), "")),
+        "proxyPort": _clean_str(port, _clean_str(file_cfg.get("proxyPort"), "")),
+        "proxyUser": _clean_str(user, _clean_str(file_cfg.get("proxyUser"), "")),
+        "proxyPass": _clean_str(password, _clean_str(file_cfg.get("proxyPass"), "")),
+        "proxyType": _clean_str(proxy_type, _clean_str(file_cfg.get("proxyType"), "http")),
     }
 
 

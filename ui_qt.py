@@ -4,14 +4,31 @@ import os
 import re
 import sys
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+KEEP_WINDOW_STATUS_OPTIONS = [
+    "未开启2FA",
+    "成功",
+    "失败",
+    "已跳过",
+    "已注册",
+    "用户名占用",
+    "服务拒绝",
+]
+
 
 class ProxySettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent: Optional[QtWidgets.QWidget], current_cfg: dict[str, str], test_cb: Callable[[dict[str, str]], tuple[bool, str]], test_bb_cb: Callable[[], tuple[bool, str]]):
+    def __init__(
+        self,
+        parent: Optional[QtWidgets.QWidget],
+        current_cfg: dict[str, Any],
+        test_cb: Callable[[dict[str, str]], tuple[bool, str]],
+        test_bb_cb: Callable[[dict[str, Any]], tuple[bool, str]],
+    ):
         super().__init__(parent)
         self.setWindowTitle("系统设置")
         self.setMinimumWidth(450)
@@ -19,7 +36,7 @@ class ProxySettingsDialog(QtWidgets.QDialog):
         self._test_bb_cb = test_bb_cb
         self._init_ui(current_cfg)
 
-    def _init_ui(self, cfg: dict[str, str]) -> None:
+    def _init_ui(self, cfg: dict[str, Any]) -> None:
         layout = QtWidgets.QVBoxLayout(self)
         layout.setSpacing(15)
 
@@ -75,6 +92,39 @@ class ProxySettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(bb_group)
 
+        runtime_group = QtWidgets.QGroupBox("运行配置")
+        runtime_layout = QtWidgets.QFormLayout(runtime_group)
+        runtime_layout.setSpacing(10)
+
+        self.sb_threads = QtWidgets.QSpinBox()
+        self.sb_threads.setRange(1, 32)
+        self.sb_threads.setValue(max(1, min(32, int(cfg.get("threadCount", 1) or 1))))
+        self.sb_threads.setToolTip("同时运行的账号数量，建议从 1-3 开始逐步调整")
+        runtime_layout.addRow("线程数：", self.sb_threads)
+
+        keep_box = QtWidgets.QWidget()
+        keep_layout = QtWidgets.QGridLayout(keep_box)
+        keep_layout.setContentsMargins(0, 0, 0, 0)
+        keep_layout.setHorizontalSpacing(14)
+        keep_layout.setVerticalSpacing(6)
+        selected_keep = {str(v).strip() for v in cfg.get("keepWindowStatuses", []) if str(v).strip()}
+        self.keep_window_checks: dict[str, QtWidgets.QCheckBox] = {}
+        for i, status in enumerate(KEEP_WINDOW_STATUS_OPTIONS):
+            cb = QtWidgets.QCheckBox(status)
+            cb.setChecked(status in selected_keep)
+            row = i // 2
+            col = i % 2
+            keep_layout.addWidget(cb, row, col)
+            self.keep_window_checks[status] = cb
+        runtime_layout.addRow("保留窗口：", keep_box)
+
+        tip = QtWidgets.QLabel("建议先用 1-3 个线程测试稳定性，并发过高可能增加风控或资源占用。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #6b7280;")
+        runtime_layout.addRow("", tip)
+
+        layout.addWidget(runtime_group)
+
         # 底部按钮
         btn_layout = QtWidgets.QHBoxLayout()
         btn_layout.addStretch()
@@ -111,29 +161,21 @@ class ProxySettingsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "代理测试失败", msg)
 
     def _on_test_bb(self) -> None:
-        # 在测试前先临时保存当前输入的 BB 配置到内存（不持久化），以便测试函数能获取到
-        # 注意：这里我们假设 test_bb_cb 会调用 check_bitbrowser_alive，
-        # 而 check_bitbrowser_alive 依赖 get_bitbrowser_config。
-        # 为了让测试反映当前输入框的值，我们需要一个中间层。
-        # 但由于 test_bb_cb 是在 MainWindow 中定义的，我们可以通过它传递。
-        
         self.btn_test_bb.setEnabled(False)
         self.btn_test_bb.setText("正在检测...")
         QtCore.QCoreApplication.processEvents()
-        
-        # 我们直接调用 check_bitbrowser_alive 的逻辑，但使用当前输入框的值
-        # 为了保持 ui_qt 的纯净，我们让 MainWindow 处理
-        ok, msg = self._test_bb_cb()
-        
+
+        ok, msg = self._test_bb_cb(self.get_config())
+
         self.btn_test_bb.setEnabled(True)
         self.btn_test_bb.setText("检测 BitBrowser 服务")
-        
+
         if ok:
             QtWidgets.QMessageBox.information(self, "BitBrowser 正常", msg)
         else:
             QtWidgets.QMessageBox.critical(self, "BitBrowser 异常", msg)
 
-    def get_config(self) -> dict[str, str]:
+    def get_config(self) -> dict[str, Any]:
         return {
             "proxyType": self.cb_type.currentText(),
             "proxyHost": self.ed_host.text().strip(),
@@ -142,6 +184,10 @@ class ProxySettingsDialog(QtWidgets.QDialog):
             "proxyPass": self.ed_pass.text().strip(),
             "bitbrowserUrl": self.ed_bb_url.text().strip(),
             "bitbrowserKey": self.ed_bb_key.text().strip(),
+            "threadCount": self.sb_threads.value(),
+            "keepWindowStatuses": [
+                status for status, cb in self.keep_window_checks.items() if cb.isChecked()
+            ],
         }
 
 
@@ -278,59 +324,217 @@ class AccountsModel(QtCore.QAbstractTableModel):
         self.endResetModel()
 
 
-class Worker(QtCore.QObject):
+class AccountWorker(QtCore.QObject):
     log = QtCore.Signal(str)
     status = QtCore.Signal(int, str)         # idx, status_text
-    progress = QtCore.Signal(int, int)       # done, total
     current = QtCore.Signal(str)             # current label
-    done = QtCore.Signal(int, int)           # success, fail
+    done = QtCore.Signal(int, str)           # idx, result
+
+    def __init__(
+        self,
+        run_one: Callable[[dict[str, Any], Callable[[str], None], Callable[[str], None], Callable[[], bool]], str],
+        account: dict[str, Any],
+        idx: int,
+        seq: int,
+        total: int,
+        slot_id: int,
+        should_cancel_current: Callable[[], bool],
+    ):
+        super().__init__()
+        self._run_one = run_one
+        self._account = account
+        self._idx = idx
+        self._seq = seq
+        self._total = total
+        self._slot_id = slot_id
+        self._should_cancel_current = should_cancel_current
+
+    def slot_id(self) -> int:
+        return self._slot_id
+
+    def _log_prefix(self) -> str:
+        email = str(self._account.get("email", ""))
+        return f"[线程{self._slot_id}][{self._seq}/{self._total}][{email}]"
+
+    def _format_log(self, msg: str) -> str:
+        text = str(msg or "")
+        if not text:
+            return self._log_prefix()
+        email = str(self._account.get("email", ""))
+        email_tag = f"[{email}] "
+        lines = text.splitlines()
+        if not lines:
+            lines = [text]
+        out: list[str] = []
+        for line in lines:
+            clean = line
+            if clean.startswith(email_tag):
+                clean = clean[len(email_tag):]
+            if clean:
+                out.append(f"{self._log_prefix()} {clean}")
+            else:
+                out.append(self._log_prefix())
+        return "\n".join(out)
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        if self._should_cancel_current():
+            self.done.emit(self._idx, "skipped")
+            return
+
+        email = self._account.get("email", "")
+        self.current.emit(f"线程{self._slot_id} 处理中: {email}")
+        self.log.emit("\n" + self._format_log("=" * 55))
+        self.log.emit(self._format_log("开始处理账号"))
+        self.log.emit(self._format_log("=" * 55))
+
+        def _log(msg: str) -> None:
+            self.log.emit(self._format_log(msg))
+
+        def _on_status(st: str) -> None:
+            self.status.emit(self._idx, st)
+
+        result = self._run_one(self._account, _log, _on_status, self._should_cancel_current)
+        self.done.emit(self._idx, result)
+
+
+class WorkerController(QtCore.QObject):
+    log = QtCore.Signal(str)
+    status = QtCore.Signal(int, str)
+    progress = QtCore.Signal(int, int)
+    current = QtCore.Signal(str)
+    done = QtCore.Signal(int, int)
+    stopping = QtCore.Signal()
+    slot_update = QtCore.Signal(int, str, str)  # slot_id, label, state
 
     def __init__(
         self,
         run_one: Callable[[dict[str, Any], Callable[[str], None], Callable[[str], None], Callable[[], bool]], str],
         accounts_ref: list[dict[str, Any]],
         indices: list[int],
-        is_cancelled: Callable[[], bool],
-        status_texts: dict[str, str],
+        concurrency: int,
+        should_stop_dispatch: Callable[[], bool],
+        should_cancel_current: Callable[[], bool],
     ):
         super().__init__()
         self._run_one = run_one
         self._accounts = accounts_ref
         self._indices = indices
-        self._is_cancelled = is_cancelled
+        self._concurrency = max(1, concurrency)
+        self._should_stop_dispatch = should_stop_dispatch
+        self._should_cancel_current = should_cancel_current
+        self._next_pos = 0
+        self._running = 0
+        self._completed = 0
         self._success = 0
         self._fail = 0
-        self._status_texts = status_texts
+        self._finished = False
+        self._stop_notice_emitted = False
+        self._threads: list[QtCore.QThread] = []
+        self._workers: list[AccountWorker] = []
+        self._result_lock = threading.Lock()
+        self._free_slots: list[int] = list(range(1, self._concurrency + 1))
+        self._worker_slots: dict[AccountWorker, int] = {}
 
     @QtCore.Slot()
     def run(self) -> None:
-        total = len(self._indices)
-        for seq, idx in enumerate(self._indices):
-            if self._is_cancelled():
-                break
+        if not self._indices:
+            self._finalize_if_needed()
+            return
+        for slot_id in range(1, self._concurrency + 1):
+            self.slot_update.emit(slot_id, f"线程{slot_id}", "空闲")
+        self.progress.emit(0, len(self._indices))
+        self._launch_more()
 
-            acc = self._accounts[idx]
-            email = acc.get("email", "")
-            self.current.emit(f"处理中: {email}")
-            self.log.emit("\n" + "=" * 55)
-            self.log.emit(f"[{seq + 1}/{total}] 开始: {email} (小水滴取件)")
-            self.log.emit("=" * 55)
+    def _launch_more(self) -> None:
+        while (
+            not self._should_stop_dispatch()
+            and self._running < self._concurrency
+            and self._next_pos < len(self._indices)
+        ):
+            idx = self._indices[self._next_pos]
+            seq = self._next_pos + 1
+            self._next_pos += 1
+            self._start_one(idx, seq, len(self._indices))
 
-            def _log(msg: str) -> None:
-                self.log.emit(msg)
+        if self._should_stop_dispatch() and not self._stop_notice_emitted:
+            self._stop_notice_emitted = True
+            self.log.emit(">>> 已停止派发新任务，等待已启动线程收尾…")
+            self.stopping.emit()
+        self._finalize_if_needed()
 
-            def _on_status(st: str) -> None:
-                self.status.emit(idx, st)
+    def _start_one(self, idx: int, seq: int, total: int) -> None:
+        if not self._free_slots:
+            return
+        slot_id = self._free_slots.pop(0)
+        email = str(self._accounts[idx].get("email", ""))
+        worker = AccountWorker(
+            run_one=self._run_one,
+            account=self._accounts[idx],
+            idx=idx,
+            seq=seq,
+            total=total,
+            slot_id=slot_id,
+            should_cancel_current=self._should_cancel_current,
+        )
+        thread = QtCore.QThread()
+        worker.moveToThread(thread)
 
-            result = self._run_one(acc, _log, _on_status, self._is_cancelled)
+        worker.log.connect(self.log)
+        worker.status.connect(self.status)
+        worker.current.connect(self.current)
+        worker.done.connect(self._on_worker_done)
+        worker.done.connect(thread.quit)
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda thr=thread, wk=worker: self._cleanup_worker(thr, wk))
 
+        self._threads.append(thread)
+        self._workers.append(worker)
+        self._worker_slots[worker] = slot_id
+        self._running += 1
+        self.slot_update.emit(slot_id, f"线程{slot_id}", f"运行中 · {email}")
+        thread.start()
+
+    def _cleanup_worker(self, thread: QtCore.QThread, worker: AccountWorker) -> None:
+        if thread in self._threads:
+            self._threads.remove(thread)
+        if worker in self._workers:
+            self._workers.remove(worker)
+        slot_id = self._worker_slots.pop(worker, 0)
+        if slot_id:
+            self._free_slots.append(slot_id)
+            self._free_slots.sort()
+            self.slot_update.emit(slot_id, f"线程{slot_id}", "空闲")
+        self._finalize_if_needed()
+
+    @QtCore.Slot(int, str)
+    def _on_worker_done(self, idx: int, result: str) -> None:
+        with self._result_lock:
+            self._running = max(0, self._running - 1)
+            self._completed += 1
             if result in ("success", "partial"):
                 self._success += 1
             elif result == "failed":
                 self._fail += 1
 
-            self.progress.emit(seq + 1, total)
+        email = ""
+        if 0 <= idx < len(self._accounts):
+            email = str(self._accounts[idx].get("email", ""))
+        if email:
+            self.current.emit(f"最近完成: {email}")
+        self.progress.emit(self._completed, len(self._indices))
+        self._launch_more()
 
+    def _finalize_if_needed(self) -> None:
+        if self._finished:
+            return
+        if self._running > 0:
+            return
+        if self._next_pos < len(self._indices) and not self._should_stop_dispatch():
+            return
+        self._finished = True
         self.done.emit(self._success, self._fail)
 
 
@@ -347,10 +551,11 @@ class MainWindow(QtWidgets.QMainWindow):
         open_output: Callable[[], None],
         failed_batch_start: Callable[[int], None],
         deduplicate_failed: Callable[[], int],
+        get_app_cfg: Callable[[], dict[str, Any]],
         get_proxy_cfg: Callable[[], dict[str, str]],
-        save_proxy_cfg: Callable[[dict[str, str]], None],
+        save_proxy_cfg: Callable[[dict[str, Any]], None],
         test_proxy_conn: Callable[[dict[str, str]], tuple[bool, str]],
-        test_bb_conn: Callable[[], tuple[bool, str]],
+        test_bb_conn: Callable[..., tuple[bool, str]],
         icon_path: Optional[str] = None,
     ):
         super().__init__()
@@ -372,6 +577,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._open_output_cb = open_output
         self._failed_batch_start = failed_batch_start
         self._deduplicate_failed = deduplicate_failed
+        self._get_app_cfg = get_app_cfg
         self._get_proxy_cfg = get_proxy_cfg
         self._save_proxy_cfg = save_proxy_cfg
         self._test_proxy_conn = test_proxy_conn
@@ -380,10 +586,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.accounts: list[dict[str, Any]] = []
         self._rows: list[AccountRow] = []
         self._running = False
+        self._stop_requested = False
         self._skip_current = False
+        self._thread_count = max(1, min(32, int(self._get_app_cfg().get("threadCount", 1) or 1)))
 
-        self._thread: Optional[QtCore.QThread] = None
-        self._worker: Optional[Worker] = None
+        self._worker: Optional[WorkerController] = None
+        self._thread_status_labels: dict[int, QtWidgets.QLabel] = {}
+        self._current_batch_indices: list[int] = []
+        self._batch_total = 0
+        self._batch_done = 0
+        self._batch_success = 0
+        self._batch_fail = 0
 
         self._build_ui()
         self._apply_initial_split()
@@ -528,6 +741,18 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         row.addWidget(self.lbl_step)
         pl.addLayout(row)
+        self.lbl_threads = QtWidgets.QLabel(f"并发线程：{self._thread_count}")
+        self.lbl_threads.setStyleSheet("color: #6b7280;")
+        pl.addWidget(self.lbl_threads)
+
+        self.thread_group = QtWidgets.QGroupBox("线程状态")
+        thread_layout = QtWidgets.QGridLayout(self.thread_group)
+        thread_layout.setContentsMargins(12, 12, 12, 12)
+        thread_layout.setHorizontalSpacing(10)
+        thread_layout.setVerticalSpacing(8)
+        self._thread_status_layout = thread_layout
+        pl.addWidget(self.thread_group)
+
         self.progress = QtWidgets.QProgressBar()
         self.progress.setValue(0)
         pl.addWidget(self.progress)
@@ -585,6 +810,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._log_buffer: list[str] = []
         self._apply_font()
+        self._rebuild_thread_status_panel()
+        self._refresh_result_view()
 
     def _apply_font(self) -> None:
         # 更像“工具软件”的默认字体（mac 用 Menlo）
@@ -624,6 +851,150 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.setColumnWidth(2, 168)
         self.table.setColumnWidth(3, 68)
 
+    def _rebuild_thread_status_panel(self) -> None:
+        while self._thread_status_layout.count():
+            item = self._thread_status_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._thread_status_labels.clear()
+
+        cols = 2 if self._thread_count > 1 else 1
+        for i in range(self._thread_count):
+            slot_id = i + 1
+            label = QtWidgets.QLabel(f"线程{slot_id}：空闲")
+            label.setStyleSheet("color: #6b7280;")
+            label.setWordWrap(True)
+            row = i // cols
+            col = i % cols
+            self._thread_status_layout.addWidget(label, row, col)
+            self._thread_status_labels[slot_id] = label
+
+    def _set_thread_status(self, slot_id: int, text: str, running: bool = False) -> None:
+        label = self._thread_status_labels.get(slot_id)
+        if not label:
+            return
+        color = "#1d4ed8" if running else "#6b7280"
+        label.setStyleSheet(f"color: {color};")
+        label.setText(text)
+
+    def _get_batch_metrics(self) -> dict[str, int]:
+        if not self._current_batch_indices:
+            return {
+                "total": 0,
+                "done": 0,
+                "success": 0,
+                "fail": 0,
+                "skipped": 0,
+            }
+
+        success_states = {"成功", "未开启2FA"}
+        failure_states = {"失败", "已注册", "用户名占用", "服务拒绝"}
+
+        success = 0
+        fail = 0
+        skipped = 0
+        total = 0
+        for idx in self._current_batch_indices:
+            if idx < 0 or idx >= len(self.accounts):
+                continue
+            total += 1
+            status = str(self.accounts[idx].get("status", "等待"))
+            if status in success_states:
+                success += 1
+            elif status in failure_states:
+                fail += 1
+            elif status == "已跳过":
+                skipped += 1
+
+        done = success + fail + skipped
+        return {
+            "total": total,
+            "done": done,
+            "success": success,
+            "fail": fail,
+            "skipped": skipped,
+        }
+
+    def _refresh_result_view(self) -> None:
+        total = len(self.accounts)
+        counts = {
+            "等待": 0,
+            "进行中": 0,
+            "成功": 0,
+            "失败": 0,
+            "已跳过": 0,
+            "其他": 0,
+        }
+        success_lines: list[str] = []
+        failed_lines: list[str] = []
+
+        success_states = {"成功", "未开启2FA"}
+        running_states = {"进行中", "人机验证", "取码验证", "获取2FA"}
+        failure_states = {"失败", "已注册", "用户名占用", "服务拒绝"}
+
+        for acc in self.accounts:
+            email = str(acc.get("email", ""))
+            status = str(acc.get("status", "等待"))
+            if status == "等待":
+                counts["等待"] += 1
+            elif status in running_states:
+                counts["进行中"] += 1
+            elif status in success_states:
+                counts["成功"] += 1
+                success_lines.append(f"{email}\t{status}")
+            elif status in failure_states:
+                counts["失败"] += 1
+                failed_lines.append(f"{email}\t{status}")
+            elif status == "已跳过":
+                counts["已跳过"] += 1
+            else:
+                counts["其他"] += 1
+
+        batch = self._get_batch_metrics()
+        if batch["done"] < batch["total"]:
+            batch_denominator = batch["done"]
+            batch_rate_label = "当前成功率（已完成）"
+        else:
+            batch_denominator = batch["total"]
+            batch_rate_label = "批次成功率"
+        batch_rate = (batch["success"] / batch_denominator * 100.0) if batch_denominator else 0.0
+
+        lines = [
+            f"总数：{total}",
+            f"等待：{counts['等待']}",
+            f"进行中：{counts['进行中']}",
+            f"成功：{counts['成功']}",
+            f"失败：{counts['失败']}",
+            f"已跳过：{counts['已跳过']}",
+        ]
+        if counts["其他"]:
+            lines.append(f"其他：{counts['其他']}")
+
+        if batch["total"] > 0:
+            lines.extend([
+                "",
+                "[当前批次]",
+                f"批次总数：{batch['total']}",
+                f"批次完成：{batch['done']}",
+                f"批次成功：{batch['success']}",
+                f"批次失败：{batch['fail']}",
+                f"批次跳过：{batch['skipped']}",
+                f"{batch_rate_label}：{batch_rate:.1f}%",
+            ])
+
+        if success_lines:
+            lines.append("")
+            lines.append("[成功账号]")
+            lines.extend(success_lines)
+
+        if failed_lines:
+            lines.append("")
+            lines.append("[失败账号]")
+            lines.extend(failed_lines)
+
+        self.result_view.setPlainText("\n".join(lines))
+
     # ---------------- Data / Detail ----------------
     def _refresh_rows(self) -> None:
         self._rows = [
@@ -638,6 +1009,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 导入/刷新后重新应用列布局，确保“邮箱列撑满”
         self._apply_table_column_layout()
         self._update_detail()
+        self._refresh_result_view()
 
     def _selected_indices(self) -> list[int]:
         sel = self.table.selectionModel().selectedRows()
@@ -747,13 +1119,18 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------------- Run control ----------------
     def _set_running(self, running: bool) -> None:
         self._running = running
-        self._skip_current = False
+        if running:
+            self._stop_requested = False
+            self._skip_current = False
         self.act_run_selected.setEnabled(not running)
         self.act_run_all.setEnabled(not running)
-        self.act_skip.setEnabled(running)
+        self.act_skip.setEnabled(running and self._thread_count == 1)
         self.act_stop.setEnabled(running)
 
-    def _is_cancelled(self) -> bool:
+    def _should_stop_dispatch(self) -> bool:
+        return self._stop_requested or (not self._running)
+
+    def _should_cancel_current(self) -> bool:
         return (not self._running) or self._skip_current
 
     @QtCore.Slot()
@@ -774,49 +1151,59 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_work(self, indices: list[int]) -> None:
         self.clear_logs()
+        self._rebuild_thread_status_panel()
+        self._current_batch_indices = list(indices)
+        self._batch_total = len(indices)
+        self._batch_done = 0
+        self._batch_success = 0
+        self._batch_fail = 0
+        self._refresh_result_view()
         self.progress.setMaximum(len(indices))
         self.progress.setValue(0)
-        self.statusBar().showMessage("任务运行中… 请勿关闭 BitBrowser 窗口")
+        self.lbl_threads.setText(f"并发线程：{self._thread_count}")
+        self.statusBar().showMessage(f"任务运行中… 请勿关闭 BitBrowser 窗口（并发 {self._thread_count}）")
         try:
             self._failed_batch_start(len(indices))
         except Exception:
             pass
 
         self._set_running(True)
-
-        self._thread = QtCore.QThread()
-        self._worker = Worker(
+        self._worker = WorkerController(
             run_one=self._run_one,
             accounts_ref=self.accounts,
             indices=indices,
-            is_cancelled=self._is_cancelled,
-            status_texts={},
+            concurrency=self._thread_count,
+            should_stop_dispatch=self._should_stop_dispatch,
+            should_cancel_current=self._should_cancel_current,
         )
-        self._worker.moveToThread(self._thread)
-
-        self._thread.started.connect(self._worker.run)
         self._worker.log.connect(self.append_log)
         self._worker.status.connect(self._on_status)
         self._worker.progress.connect(self._on_progress)
         self._worker.current.connect(self._on_current)
+        self._worker.stopping.connect(self._on_stopping)
+        self._worker.slot_update.connect(self._on_slot_update)
         self._worker.done.connect(self._on_done)
-        self._worker.done.connect(self._thread.quit)
         self._worker.done.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-
-        self._thread.start()
+        self._worker.done.connect(lambda *_args: setattr(self, "_worker", None))
+        QtCore.QTimer.singleShot(0, self._worker.run)
 
     @QtCore.Slot()
     def skip_current(self) -> None:
+        if self._thread_count > 1:
+            QtWidgets.QMessageBox.information(self, "提示", "多线程模式下不支持“跳过当前”，请使用“停止”。")
+            return
         self._skip_current = True
         self.append_log(">>> 用户请求跳过当前账号，等待当前步骤结束…")
 
     @QtCore.Slot()
     def stop(self) -> None:
-        self._running = False
-        self._skip_current = True
-        self.append_log(">>> 用户请求停止")
-        self._set_running(False)
+        self._stop_requested = True
+        self.append_log(">>> 用户请求停止：不再派发新任务，已启动线程会继续收尾")
+        self.statusBar().showMessage("正在停止任务…等待已启动线程收尾")
+        self.act_run_selected.setEnabled(False)
+        self.act_run_all.setEnabled(False)
+        self.act_skip.setEnabled(False)
+        self.act_stop.setEnabled(False)
 
     # ---------------- Worker events ----------------
     @QtCore.Slot(str)
@@ -874,7 +1261,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def clear_logs(self) -> None:
         self._log_buffer.clear()
         self.log_view.clear()
-        self.result_view.clear()
+        self._refresh_result_view()
 
     @QtCore.Slot()
     def open_failed_accounts_plain(self) -> None:
@@ -909,24 +1296,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def show_proxy_settings(self) -> None:
-        # 获取包含代理和 BB 的完整配置
-        current = self._get_proxy_cfg()
-        
-        def _test_bb_with_current_ui():
-            # 这里特殊处理：由于 check_bitbrowser_alive 会读取 config.json，
-            # 我们需要在测试前先保存当前的输入（临时或持久化）。
-            # 为了简单起见，我们让用户知道测试的是“当前已填写的”配置。
-            # 这里我们通过对话框直接获取当前值并保存
-            if hasattr(self, '_active_settings_dialog'):
-                new_cfg = self._active_settings_dialog.get_config()
-                self._save_proxy_cfg(new_cfg)
-            return self._test_bb_conn()
+        current = self._get_app_cfg()
+
+        def _test_bb_with_current_ui(cfg: dict[str, Any]) -> tuple[bool, str]:
+            try:
+                return self._test_bb_conn(cfg)
+            except TypeError:
+                return self._test_bb_conn()
 
         dlg = ProxySettingsDialog(self, current, self._test_proxy_conn, _test_bb_with_current_ui)
         self._active_settings_dialog = dlg
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             new_cfg = dlg.get_config()
             self._save_proxy_cfg(new_cfg)
+            self._thread_count = max(1, min(32, int(new_cfg.get("threadCount", 1) or 1)))
+            self.lbl_threads.setText(f"并发线程：{self._thread_count}")
+            self._rebuild_thread_status_panel()
             self.append_log(">>> 系统设置已保存")
             QtWidgets.QMessageBox.information(self, "设置已保存", "新的代理与 BitBrowser 配置已生效。")
         self._active_settings_dialog = None
@@ -946,20 +1331,51 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(int, int)
     def _on_progress(self, done: int, total: int) -> None:
+        self._batch_done = done
         self.progress.setMaximum(total)
         self.progress.setValue(done)
+        self._refresh_result_view()
 
     @QtCore.Slot(str)
     def _on_current(self, s: str) -> None:
         self.lbl_current.setText(s)
 
+    @QtCore.Slot()
+    def _on_stopping(self) -> None:
+        self.lbl_step.setText("停止中")
+        self.statusBar().showMessage("已停止派发新任务，等待已启动线程收尾")
+
+    @QtCore.Slot(int, str, str)
+    def _on_slot_update(self, slot_id: int, label: str, state: str) -> None:
+        text = f"{label}：{state}"
+        running = state != "空闲"
+        self._set_thread_status(slot_id, text, running=running)
+
     @QtCore.Slot(int, int)
     def _on_done(self, success: int, fail: int) -> None:
+        batch = self._get_batch_metrics()
+        self._batch_success = batch["success"]
+        self._batch_fail = batch["fail"]
+        self._batch_done = batch["done"]
         self._set_running(False)
         self.lbl_current.setText("已完成")
         self.lbl_step.setText("")
-        self.statusBar().showMessage(f"本轮结束 · 成功 {success} · 失败 {fail}")
-        self.append_log(f"\n任务完成。成功: {success}，失败: {fail}")
+        if batch["done"] < batch["total"]:
+            rate_denominator = batch["done"]
+            rate_label = "成功率（已完成部分）"
+        else:
+            rate_denominator = batch["total"]
+            rate_label = "成功率"
+        rate = (batch["success"] / rate_denominator * 100.0) if rate_denominator else 0.0
+        self.statusBar().showMessage(
+            f"本轮结束 · 成功 {success} · 失败 {fail} · {rate_label} {rate:.1f}%"
+        )
+        self.append_log(
+            f"\n任务完成。成功: {success}，失败: {fail}，{rate_label}: {rate:.1f}%"
+        )
+        for slot_id in self._thread_status_labels:
+            self._set_thread_status(slot_id, f"线程{slot_id}：空闲", running=False)
+        self._refresh_result_view()
         # 任务结束后自动执行一次清理
         self.deduplicate_accounts(silent=True)
 
@@ -975,10 +1391,11 @@ def run_qt_app(
     open_output: Callable[[], None],
     failed_batch_start: Callable[[int], None],
     deduplicate_failed: Callable[[], int],
+    get_app_cfg: Callable[[], dict[str, Any]],
     get_proxy_cfg: Callable[[], dict[str, str]],
-    save_proxy_cfg: Callable[[dict[str, str]], None],
+    save_proxy_cfg: Callable[[dict[str, Any]], None],
     test_proxy_conn: Callable[[dict[str, str]], tuple[bool, str]],
-    test_bb_conn: Callable[[], tuple[bool, str]],
+    test_bb_conn: Callable[..., tuple[bool, str]],
     **kwargs: Any,
 ) -> int:
     app = QtWidgets.QApplication(sys.argv)
@@ -997,6 +1414,7 @@ def run_qt_app(
         open_output=open_output,
         failed_batch_start=failed_batch_start,
         deduplicate_failed=deduplicate_failed,
+        get_app_cfg=get_app_cfg,
         get_proxy_cfg=get_proxy_cfg,
         save_proxy_cfg=save_proxy_cfg,
         test_proxy_conn=test_proxy_conn,

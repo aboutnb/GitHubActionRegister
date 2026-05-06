@@ -247,8 +247,15 @@ def close_extra_tabs_after_open(
 
 def check_bitbrowser_alive() -> tuple[bool, str]:
     """检测 BitBrowser 本地服务是否在线。"""
+    return check_bitbrowser_alive_with_config()
+
+
+def check_bitbrowser_alive_with_config(
+    config: Optional[dict[str, Any]] = None,
+) -> tuple[bool, str]:
+    """检测指定配置下的 BitBrowser 本地服务是否在线。"""
     try:
-        base_url, api_key = get_bitbrowser_config()
+        base_url, api_key = get_bitbrowser_config(config)
         url = f"{base_url.rstrip('/')}/browser/list"
         headers = {"x-api-key": api_key}
         resp = requests.post(url, json={"page": 0, "pageSize": 1}, headers=headers, timeout=5)
