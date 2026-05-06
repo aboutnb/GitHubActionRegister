@@ -720,29 +720,29 @@ def _run_single_account(
         if profile_id:
             try:
                 keep_statuses = _keep_window_statuses()
-                keep_window = final_ui_status in keep_statuses
-                if keep_window:
-                    log(f"[{email}] 命中保留窗口策略（状态: {final_ui_status}），保留 BitBrowser 窗口")
+                keep_profile = final_ui_status in keep_statuses
+                try:
+                    close_browser(profile_id)
+                    time.sleep(2)
+                except Exception:
+                    pass
+
+                if keep_profile:
+                    log(f"[{email}] 命中保留档案策略（状态: {final_ui_status}），已关闭窗口并保留 BitBrowser 档案")
                 else:
-                    # 先关闭浏览器窗口，再删除档案（提高删除成功率）
-                    try:
-                        close_browser(profile_id)
-                        time.sleep(2)
-                    except Exception:
-                        pass
                     try:
                         delete_browser(profile_id)
-                        log(f"[{email}] 已根据清理策略删除 BitBrowser 窗口（状态: {final_ui_status}）")
+                        log(f"[{email}] 已根据清理策略关闭窗口并删除 BitBrowser 档案（状态: {final_ui_status}）")
                     except Exception as ex1:
-                        log(f"[{email}] 首次删除窗口失败: {ex1}，3s 后重试...")
+                        log(f"[{email}] 首次删除档案失败: {ex1}，3s 后重试...")
                         time.sleep(3)
                         try:
                             delete_browser(profile_id)
-                            log(f"[{email}] 重试删除成功")
+                            log(f"[{email}] 重试删除档案成功")
                         except Exception as ex2:
-                            log(f"[{email}] 重试删除仍失败: {ex2}")
+                            log(f"[{email}] 重试删除档案仍失败: {ex2}")
             except Exception as ex:
-                log(f"[{email}] 清理 BitBrowser 窗口失败: {ex}")
+                log(f"[{email}] 清理 BitBrowser 档案失败: {ex}")
 
 
 # ---------------------------------------------------------------------------

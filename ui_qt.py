@@ -13,11 +13,6 @@ from PySide6 import QtCore, QtGui, QtWidgets
 KEEP_WINDOW_STATUS_OPTIONS = [
     "未开启2FA",
     "成功",
-    "失败",
-    "已跳过",
-    "已注册",
-    "用户名占用",
-    "服务拒绝",
 ]
 
 
@@ -116,7 +111,7 @@ class ProxySettingsDialog(QtWidgets.QDialog):
             col = i % 2
             keep_layout.addWidget(cb, row, col)
             self.keep_window_checks[status] = cb
-        runtime_layout.addRow("保留窗口：", keep_box)
+        runtime_layout.addRow("保留档案：", keep_box)
 
         tip = QtWidgets.QLabel("建议先用 1-3 个线程测试稳定性，并发过高可能增加风控或资源占用。")
         tip.setWordWrap(True)
@@ -450,12 +445,15 @@ class WorkerController(QtCore.QObject):
         while (
             not self._should_stop_dispatch()
             and self._running < self._concurrency
+            and self._free_slots
             and self._next_pos < len(self._indices)
         ):
             idx = self._indices[self._next_pos]
             seq = self._next_pos + 1
-            self._next_pos += 1
-            self._start_one(idx, seq, len(self._indices))
+            if self._start_one(idx, seq, len(self._indices)):
+                self._next_pos += 1
+            else:
+                break
 
         if self._should_stop_dispatch() and not self._stop_notice_emitted:
             self._stop_notice_emitted = True
@@ -463,9 +461,9 @@ class WorkerController(QtCore.QObject):
             self.stopping.emit()
         self._finalize_if_needed()
 
-    def _start_one(self, idx: int, seq: int, total: int) -> None:
+    def _start_one(self, idx: int, seq: int, total: int) -> bool:
         if not self._free_slots:
-            return
+            return False
         slot_id = self._free_slots.pop(0)
         email = str(self._accounts[idx].get("email", ""))
         worker = AccountWorker(
@@ -496,6 +494,7 @@ class WorkerController(QtCore.QObject):
         self._running += 1
         self.slot_update.emit(slot_id, f"线程{slot_id}", f"运行中 · {email}")
         thread.start()
+        return True
 
     def _cleanup_worker(self, thread: QtCore.QThread, worker: AccountWorker) -> None:
         if thread in self._threads:
@@ -507,7 +506,7 @@ class WorkerController(QtCore.QObject):
             self._free_slots.append(slot_id)
             self._free_slots.sort()
             self.slot_update.emit(slot_id, f"线程{slot_id}", "空闲")
-        self._finalize_if_needed()
+        self._launch_more()
 
     @QtCore.Slot(int, str)
     def _on_worker_done(self, idx: int, result: str) -> None:
@@ -525,7 +524,6 @@ class WorkerController(QtCore.QObject):
         if email:
             self.current.emit(f"最近完成: {email}")
         self.progress.emit(self._completed, len(self._indices))
-        self._launch_more()
 
     def _finalize_if_needed(self) -> None:
         if self._finished:

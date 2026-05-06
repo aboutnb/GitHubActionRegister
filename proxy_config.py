@@ -28,6 +28,7 @@ CONFIG_FILE = os.path.join(BASE_PATH, "config.json")
 DEFAULT_BITBROWSER_URL = "http://127.0.0.1:54345"
 DEFAULT_THREAD_COUNT = 1
 DEFAULT_KEEP_WINDOW_STATUSES = ["未开启2FA"]
+ALLOWED_KEEP_WINDOW_STATUSES = {"未开启2FA", "成功"}
 
 
 def _clean_str(value: Any, default: str = "") -> str:
@@ -56,6 +57,8 @@ def _normalize_keep_window_statuses(value: Any) -> list[str]:
     seen: set[str] = set()
     normalized: list[str] = []
     for item in items:
+        if item not in ALLOWED_KEEP_WINDOW_STATUSES:
+            continue
         if item not in seen:
             seen.add(item)
             normalized.append(item)
