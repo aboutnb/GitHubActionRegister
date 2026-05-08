@@ -120,6 +120,28 @@ class ProxySettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(runtime_group)
 
+        remote_group = QtWidgets.QGroupBox("管理中心同步")
+        remote_layout = QtWidgets.QFormLayout(remote_group)
+        remote_layout.setSpacing(10)
+
+        self.ed_web_admin_base_url = QtWidgets.QLineEdit(cfg.get("webAdminBaseUrl", ""))
+        self.ed_web_admin_base_url.setPlaceholderText("例如：http://127.0.0.1:18700/api")
+        remote_layout.addRow("客户端 API：", self.ed_web_admin_base_url)
+
+        self.ed_web_admin_client_token = QtWidgets.QLineEdit(cfg.get("webAdminClientToken", ""))
+        self.ed_web_admin_client_token.setPlaceholderText("桌面客户端 Token")
+        remote_layout.addRow("客户端 Token：", self.ed_web_admin_client_token)
+
+        self.cb_push_github_result = QtWidgets.QCheckBox("注册成功后自动回传 GitHub 账号")
+        self.cb_push_github_result.setChecked(bool(cfg.get("pushGithubResult", False)))
+        remote_layout.addRow("", self.cb_push_github_result)
+
+        self.cb_push_github_without_2fa = QtWidgets.QCheckBox("未开启 2FA 也回传（只要注册成功）")
+        self.cb_push_github_without_2fa.setChecked(bool(cfg.get("pushGithubWithout2fa", True)))
+        remote_layout.addRow("", self.cb_push_github_without_2fa)
+
+        layout.addWidget(remote_group)
+
         # 底部按钮
         btn_layout = QtWidgets.QHBoxLayout()
         btn_layout.addStretch()
@@ -180,9 +202,112 @@ class ProxySettingsDialog(QtWidgets.QDialog):
             "bitbrowserUrl": self.ed_bb_url.text().strip(),
             "bitbrowserKey": self.ed_bb_key.text().strip(),
             "threadCount": self.sb_threads.value(),
+            "webAdminBaseUrl": self.ed_web_admin_base_url.text().strip(),
+            "webAdminClientToken": self.ed_web_admin_client_token.text().strip(),
+            "pushGithubResult": self.cb_push_github_result.isChecked(),
+            "pushGithubWithout2fa": self.cb_push_github_without_2fa.isChecked(),
             "keepWindowStatuses": [
                 status for status, cb in self.keep_window_checks.items() if cb.isChecked()
             ],
+        }
+
+
+class ImportAccountsDialog(QtWidgets.QDialog):
+    def __init__(self, parent: Optional[QtWidgets.QWidget], current_cfg: dict[str, Any]):
+        super().__init__(parent)
+        self.setWindowTitle("导入账号")
+        self.setMinimumWidth(480)
+        self._init_ui(current_cfg)
+
+    def _init_ui(self, cfg: dict[str, Any]) -> None:
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(14)
+
+        source_group = QtWidgets.QGroupBox("账号来源")
+        source_layout = QtWidgets.QVBoxLayout(source_group)
+        source_layout.setSpacing(10)
+        self.rb_local = QtWidgets.QRadioButton("本地文件 / 剪贴板")
+        self.rb_remote = QtWidgets.QRadioButton("拉取管理中心远程账号")
+        source_layout.addWidget(self.rb_local)
+        source_layout.addWidget(self.rb_remote)
+
+        source = str(cfg.get("accountSource", "local") or "local")
+        if source == "remote":
+            self.rb_remote.setChecked(True)
+        else:
+            self.rb_local.setChecked(True)
+        layout.addWidget(source_group)
+
+        remote_group = QtWidgets.QGroupBox("远程拉取")
+        remote_layout = QtWidgets.QFormLayout(remote_group)
+        remote_layout.setSpacing(10)
+
+        self.ed_remote_base_url = QtWidgets.QLineEdit(cfg.get("webAdminBaseUrl", ""))
+        self.ed_remote_base_url.setPlaceholderText("例如：http://127.0.0.1:18700/api")
+        remote_layout.addRow("客户端 API：", self.ed_remote_base_url)
+
+        self.ed_remote_token = QtWidgets.QLineEdit(cfg.get("webAdminClientToken", ""))
+        self.ed_remote_token.setPlaceholderText("桌面客户端 Token")
+        remote_layout.addRow("客户端 Token：", self.ed_remote_token)
+
+        mode_box = QtWidgets.QWidget()
+        mode_layout = QtWidgets.QHBoxLayout(mode_box)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(12)
+        self.rb_remote_count = QtWidgets.QRadioButton("拉取数量")
+        self.rb_remote_all = QtWidgets.QRadioButton("拉取全部")
+        mode_layout.addWidget(self.rb_remote_count)
+        mode_layout.addWidget(self.rb_remote_all)
+        mode_layout.addStretch(1)
+        remote_layout.addRow("拉取方式：", mode_box)
+
+        self.sb_remote_count = QtWidgets.QSpinBox()
+        self.sb_remote_count.setRange(1, 9999)
+        self.sb_remote_count.setValue(max(1, int(cfg.get("remoteFetchCount", 10) or 10)))
+        remote_layout.addRow("拉取数量：", self.sb_remote_count)
+
+        fetch_mode = str(cfg.get("remoteFetchMode", "count") or "count")
+        if fetch_mode == "all":
+            self.rb_remote_all.setChecked(True)
+        else:
+            self.rb_remote_count.setChecked(True)
+        layout.addWidget(remote_group)
+
+        tip = QtWidgets.QLabel("远程模式会从管理中心租约拉取邮箱；本地模式保持现有导入方式。当前官方收件仍依赖管理中心接口，小水滴可完全本地运行。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #6b7280;")
+        layout.addWidget(tip)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        btn_ok = QtWidgets.QPushButton("确定")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QtWidgets.QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        layout.addLayout(btns)
+
+        self.rb_remote.toggled.connect(self._sync_state)
+        self.rb_remote_count.toggled.connect(self._sync_state)
+        self._sync_state()
+
+    def _sync_state(self) -> None:
+        remote_enabled = self.rb_remote.isChecked()
+        self.ed_remote_base_url.setEnabled(remote_enabled)
+        self.ed_remote_token.setEnabled(remote_enabled)
+        self.rb_remote_count.setEnabled(remote_enabled)
+        self.rb_remote_all.setEnabled(remote_enabled)
+        self.sb_remote_count.setEnabled(remote_enabled and self.rb_remote_count.isChecked())
+
+    def get_values(self) -> dict[str, Any]:
+        return {
+            "accountSource": "remote" if self.rb_remote.isChecked() else "local",
+            "webAdminBaseUrl": self.ed_remote_base_url.text().strip(),
+            "webAdminClientToken": self.ed_remote_token.text().strip(),
+            "remoteFetchMode": "all" if self.rb_remote_all.isChecked() else "count",
+            "remoteFetchCount": self.sb_remote_count.value(),
         }
 
 
@@ -554,6 +679,7 @@ class MainWindow(QtWidgets.QMainWindow):
         save_proxy_cfg: Callable[[dict[str, Any]], None],
         test_proxy_conn: Callable[[dict[str, str]], tuple[bool, str]],
         test_bb_conn: Callable[..., tuple[bool, str]],
+        pull_remote_accounts: Callable[[dict[str, Any]], list[dict[str, Any]]],
         icon_path: Optional[str] = None,
     ):
         super().__init__()
@@ -580,6 +706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_proxy_cfg = save_proxy_cfg
         self._test_proxy_conn = test_proxy_conn
         self._test_bb_conn = test_bb_conn
+        self._pull_remote_accounts = pull_remote_accounts
 
         self.accounts: list[dict[str, Any]] = []
         self._rows: list[AccountRow] = []
@@ -1082,6 +1209,20 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------------- Import ----------------
     @QtCore.Slot()
     def import_file(self) -> None:
+        dlg = ImportAccountsDialog(self, self._get_app_cfg())
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        opts = dlg.get_values()
+        self._save_proxy_cfg(opts)
+        if opts["accountSource"] == "remote":
+            try:
+                accounts = self._pull_remote_accounts(opts)
+                n = self._add_remote_accounts(accounts)
+                self.append_log(f"从管理中心拉取 {n} 个账号")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "远程拉取失败", str(e))
+            return
+
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择账号文件", "", "文本文件 (*.txt);;所有文件 (*)")
         if not path:
             return
@@ -1095,6 +1236,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def paste_import(self) -> None:
+        dlg = ImportAccountsDialog(self, self._get_app_cfg())
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        opts = dlg.get_values()
+        self._save_proxy_cfg(opts)
+        if opts["accountSource"] == "remote":
+            try:
+                accounts = self._pull_remote_accounts(opts)
+                n = self._add_remote_accounts(accounts)
+                self.append_log(f"从管理中心拉取 {n} 个账号")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "远程拉取失败", str(e))
+            return
+
         text = QtWidgets.QApplication.clipboard().text() or ""
         n = self._add_accounts_from_text(text)
         if n:
@@ -1110,6 +1265,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 parsed["status"] = "等待"
                 self.accounts.append(parsed)
                 added += 1
+        if added:
+            self._refresh_rows()
+        return added
+
+    def _add_remote_accounts(self, accounts: list[dict[str, Any]]) -> int:
+        added = 0
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            account = dict(account)
+            account["status"] = "等待"
+            self.accounts.append(account)
+            added += 1
         if added:
             self._refresh_rows()
         return added
@@ -1394,6 +1562,7 @@ def run_qt_app(
     save_proxy_cfg: Callable[[dict[str, Any]], None],
     test_proxy_conn: Callable[[dict[str, str]], tuple[bool, str]],
     test_bb_conn: Callable[..., tuple[bool, str]],
+    pull_remote_accounts: Callable[[dict[str, Any]], list[dict[str, Any]]],
     **kwargs: Any,
 ) -> int:
     app = QtWidgets.QApplication(sys.argv)
@@ -1417,6 +1586,7 @@ def run_qt_app(
         save_proxy_cfg=save_proxy_cfg,
         test_proxy_conn=test_proxy_conn,
         test_bb_conn=test_bb_conn,
+        pull_remote_accounts=pull_remote_accounts,
         icon_path=kwargs.get("icon_path"),
     )
     win.show()

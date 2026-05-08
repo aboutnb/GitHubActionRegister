@@ -29,6 +29,9 @@ DEFAULT_BITBROWSER_URL = "http://127.0.0.1:54345"
 DEFAULT_THREAD_COUNT = 1
 DEFAULT_KEEP_WINDOW_STATUSES = ["未开启2FA"]
 ALLOWED_KEEP_WINDOW_STATUSES = {"未开启2FA", "成功"}
+DEFAULT_ACCOUNT_SOURCE = "local"
+DEFAULT_REMOTE_FETCH_MODE = "count"
+DEFAULT_REMOTE_FETCH_COUNT = 10
 
 
 def _clean_str(value: Any, default: str = "") -> str:
@@ -44,6 +47,14 @@ def _normalize_thread_count(value: Any, default: int = DEFAULT_THREAD_COUNT) -> 
     except (TypeError, ValueError, AttributeError):
         return default
     return max(1, min(32, count))
+
+
+def _normalize_positive_int(value: Any, default: int, min_value: int = 1, max_value: int = 9999) -> int:
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return default
+    return max(min_value, min(max_value, count))
 
 
 def _normalize_keep_window_statuses(value: Any) -> list[str]:
@@ -85,6 +96,10 @@ def save_config(config: dict[str, Any]) -> None:
         thread_count = _normalize_thread_count(
             config.get("threadCount", current.get("threadCount", DEFAULT_THREAD_COUNT))
         )
+        remote_fetch_count = _normalize_positive_int(
+            config.get("remoteFetchCount", current.get("remoteFetchCount", DEFAULT_REMOTE_FETCH_COUNT)),
+            DEFAULT_REMOTE_FETCH_COUNT,
+        )
         current.update({
             "proxyHost": _clean_str(config.get("proxyHost", "")),
             "proxyPort": _clean_str(config.get("proxyPort", "")),
@@ -97,6 +112,13 @@ def save_config(config: dict[str, Any]) -> None:
             ),
             "bitbrowserKey": _clean_str(config.get("bitbrowserKey", "")),
             "threadCount": thread_count,
+            "webAdminBaseUrl": _clean_str(config.get("webAdminBaseUrl", current.get("webAdminBaseUrl", ""))),
+            "webAdminClientToken": _clean_str(config.get("webAdminClientToken", current.get("webAdminClientToken", ""))),
+            "accountSource": _clean_str(config.get("accountSource", current.get("accountSource", DEFAULT_ACCOUNT_SOURCE)), DEFAULT_ACCOUNT_SOURCE),
+            "remoteFetchMode": _clean_str(config.get("remoteFetchMode", current.get("remoteFetchMode", DEFAULT_REMOTE_FETCH_MODE)), DEFAULT_REMOTE_FETCH_MODE),
+            "remoteFetchCount": max(1, min(9999, remote_fetch_count)),
+            "pushGithubResult": bool(config.get("pushGithubResult", current.get("pushGithubResult", False))),
+            "pushGithubWithout2fa": bool(config.get("pushGithubWithout2fa", current.get("pushGithubWithout2fa", True))),
             "keepWindowStatuses": _normalize_keep_window_statuses(
                 config.get("keepWindowStatuses", current.get("keepWindowStatuses", DEFAULT_KEEP_WINDOW_STATUSES))
             ),
@@ -122,6 +144,16 @@ def get_app_config() -> dict[str, Any]:
         ),
         "bitbrowserKey": _clean_str(file_cfg.get("bitbrowserKey") or os.environ.get("BITBROWSER_API_KEY", "")),
         "threadCount": _normalize_thread_count(file_cfg.get("threadCount", DEFAULT_THREAD_COUNT)),
+        "webAdminBaseUrl": _clean_str(file_cfg.get("webAdminBaseUrl") or os.environ.get("WEB_ADMIN_BASE_URL", "")),
+        "webAdminClientToken": _clean_str(file_cfg.get("webAdminClientToken") or os.environ.get("WEB_ADMIN_CLIENT_TOKEN", "")),
+        "accountSource": _clean_str(file_cfg.get("accountSource", DEFAULT_ACCOUNT_SOURCE), DEFAULT_ACCOUNT_SOURCE),
+        "remoteFetchMode": _clean_str(file_cfg.get("remoteFetchMode", DEFAULT_REMOTE_FETCH_MODE), DEFAULT_REMOTE_FETCH_MODE),
+        "remoteFetchCount": _normalize_positive_int(
+            file_cfg.get("remoteFetchCount", DEFAULT_REMOTE_FETCH_COUNT),
+            DEFAULT_REMOTE_FETCH_COUNT,
+        ),
+        "pushGithubResult": bool(file_cfg.get("pushGithubResult", False)),
+        "pushGithubWithout2fa": bool(file_cfg.get("pushGithubWithout2fa", True)),
         "keepWindowStatuses": _normalize_keep_window_statuses(
             file_cfg.get("keepWindowStatuses", DEFAULT_KEEP_WINDOW_STATUSES)
         ),

@@ -1,0 +1,20 @@
+{
+  "proxyHost": "us.ipwo.net",
+  "proxyPort": "7878",
+  "proxyUser": "xiaobo91_custom_zone_US_sid_99949526_time_3",
+  "proxyPass": "Xb171223",
+  "proxyType": "socks5",
+  "bitbrowserUrl": "http://127.0.0.1:54345",
+  "bitbrowserKey": "ce09d101554e4383818d2da198c8f8fd",
+  "threadCount": 1,
+  "keepWindowStatuses": [
+    "未开启2FA"
+  ],
+  "webAdminBaseUrl": "http://127.0.0.1:18700/api",
+  "webAdminClientToken": "S4GNy8a7kuDhXyRK5m1z53emn6OVRmP4",
+  "accountSource": "remote",
+  "remoteFetchMode": "all",
+  "remoteFetchCount": 10,
+  "pushGithubResult": true,
+  "pushGithubWithout2fa": true
+}

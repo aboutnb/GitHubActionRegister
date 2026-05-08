@@ -53,6 +53,11 @@ from proxy_config import (
     test_proxy_connectivity,
     to_bitbrowser_proxy,
 )
+from web_admin_client import (
+    get_remote_verification_info,
+    pull_remote_mail_accounts,
+    push_github_result,
+)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -248,6 +253,26 @@ def _parse_mail_line(line: str) -> Optional[dict[str, str]]:
     return None
 
 
+def _pull_remote_accounts_for_ui(options: dict[str, Any]) -> list[dict[str, Any]]:
+    cfg = get_app_config()
+    merged = dict(cfg)
+    merged.update(options or {})
+    base_url = str(merged.get("webAdminBaseUrl") or "").strip()
+    api_token = str(merged.get("webAdminClientToken") or "").strip()
+    fetch_all = str(merged.get("remoteFetchMode") or "count") == "all"
+    limit = int(merged.get("remoteFetchCount") or 10)
+    if not base_url:
+        raise RuntimeError("请先在系统设置或导入弹窗中填写客户端 API 地址")
+    if not api_token:
+        raise RuntimeError("请先在系统设置或导入弹窗中填写客户端 API Token")
+    return pull_remote_mail_accounts(
+        base_url=base_url,
+        api_token=api_token,
+        limit=limit,
+        fetch_all=fetch_all,
+    )
+
+
 def _email_to_username(email: str, max_len: int = 20) -> str:
     return email.split("@")[0].replace(".", "").replace("+", "")[:max_len]
 
@@ -278,7 +303,20 @@ def _fetch_verification(
             return None, "已取消"
         try:
             email, pwd = account["email"], account["password"]
-            result, diag = xsd_get_verify(email, pwd)
+            source = str(account.get("source") or "local").strip().lower()
+            receive_mode = str(account.get("receive_mode") or "").strip().lower()
+            if source == "remote":
+                result, diag = get_remote_verification_info(
+                    base_url=str(get_app_config().get("webAdminBaseUrl") or ""),
+                    account=account,
+                )
+            elif receive_mode == "official":
+                result, diag = get_remote_verification_info(
+                    base_url=str(get_app_config().get("webAdminBaseUrl") or ""),
+                    account=account,
+                )
+            else:
+                result, diag = xsd_get_verify(email, pwd)
             if result:
                 return result, None
             last_diag = diag or ""
@@ -439,7 +477,8 @@ def _run_single_account(
     base_pw = account["password"]
     final_pw = base_pw + PASSWORD_SUFFIX
     username = _email_to_username(email)
-    mode_label = "小水滴"
+    receive_mode = str(account.get("receive_mode") or "xiaoshuidi").strip().lower()
+    mode_label = "官方" if receive_mode == "official" else "小水滴"
 
     profile_id = ""
     ws = ""
@@ -676,6 +715,13 @@ def _run_single_account(
             out_line = f"{email}---{final_pw}---{secret}"
             _append_output(out_line)
             log(f"[{email}] 注册成功！2FA 密钥已获取并导出")
+            _try_push_github_result(
+                account=account,
+                github_login=username,
+                github_password=final_pw,
+                totp_secret=secret,
+                log=log,
+            )
             final_ui_status = STATUS_SUCCESS
             on_status(final_ui_status)
             result_status = "success"
@@ -683,6 +729,13 @@ def _run_single_account(
         else:
             log(f"[{email}] 注册成功，但未能开启 2FA（可能需要手动完成）")
             _append_output(f"{email}---{final_pw}---NO_2FA")
+            _try_push_github_result(
+                account=account,
+                github_login=username,
+                github_password=final_pw,
+                totp_secret="",
+                log=log,
+            )
             final_ui_status = STATUS_NO_2FA
             on_status(final_ui_status)
             result_status = "success"
@@ -756,6 +809,44 @@ def _open_output_ui() -> None:
         print("提示：尚无导出文件")
 
 
+def _try_push_github_result(
+    *,
+    account: dict[str, Any],
+    github_login: str,
+    github_password: str,
+    totp_secret: str,
+    log: Callable[[str], None],
+) -> None:
+    cfg = get_app_config()
+    if not cfg.get("pushGithubResult"):
+        return
+    if not totp_secret and not cfg.get("pushGithubWithout2fa", True):
+        log("已关闭“未开启 2FA 也回传”，本次不回传管理中心")
+        return
+    base_url = str(cfg.get("webAdminBaseUrl") or "").strip()
+    api_token = str(cfg.get("webAdminClientToken") or "").strip()
+    if not base_url or not api_token:
+        log("未配置客户端 API 地址或 Token，跳过回传")
+        return
+    try:
+        push_github_result(
+            base_url=base_url,
+            api_token=api_token,
+            github_login=github_login,
+            github_password=github_password,
+            totp_secret=totp_secret,
+            bind_mail_account_id=account.get("mail_account_id"),
+            bind_email=account.get("email"),
+            lease_token=account.get("lease_token"),
+        )
+        if totp_secret:
+            log("已回传 GitHub 成品账号到管理中心")
+        else:
+            log("已回传无 2FA 的成功账号到管理中心")
+    except Exception as exc:
+        log(f"回传管理中心失败: {exc}")
+
+
 def main():
     return run_qt_app(
         window_title=WINDOW_TITLE,
@@ -772,6 +863,7 @@ def main():
         save_proxy_cfg=save_proxy_config,
         test_proxy_conn=test_proxy_connectivity,
         test_bb_conn=check_bitbrowser_alive_with_config,
+        pull_remote_accounts=_pull_remote_accounts_for_ui,
         icon_path=ICON_PATH, # 传递图标路径
     )
 

@@ -1,5 +1,10 @@
 # Env with secrets
 .env.local
+web-admin/backend/.env
+web-admin/backend/.venv/
+web-admin/frontend/node_modules/
+web-admin/frontend/dist/
+web-admin/frontend/.npm-cache/
 
 # Python
 __pycache__/

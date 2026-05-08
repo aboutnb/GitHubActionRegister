@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+BACKEND = ROOT / "backend"
+FRONTEND = ROOT / "frontend"
+
+
+def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+    print(f"$ {' '.join(cmd)}")
+    subprocess.run(cmd, cwd=cwd, env=env, check=True)
+
+
+def backend_python() -> str:
+    venv_python = BACKEND / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        run([sys.executable, "-m", "venv", ".venv"], cwd=BACKEND)
+        run([str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"], cwd=BACKEND)
+    return str(venv_python)
+
+
+def ensure_frontend_built() -> None:
+    if not (FRONTEND / "node_modules").exists():
+        run(["npm", "install"], cwd=FRONTEND)
+    run(["npm", "run", "build"], cwd=FRONTEND)
+
+
+def prepare_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("WEB_ADMIN_SERVE_FRONTEND", "true")
+    env.setdefault("WEB_ADMIN_APP_ENV", "production")
+    env.setdefault("WEB_ADMIN_DOCS_ENABLED", "false")
+    env.setdefault("WEB_ADMIN_COOKIE_SECURE", "false")
+    return env
+
+
+def main() -> None:
+    os.chdir(ROOT)
+    if not (FRONTEND / "node_modules").exists():
+        run(["npm", "install"], cwd=FRONTEND)
+    ensure_frontend_built()
+    env = prepare_env()
+    py = backend_python()
+    run([py, "create_database.py"], cwd=BACKEND, env=env)
+    run([py, "init_db.py"], cwd=BACKEND, env=env)
+    run([py, "create_admin.py"], cwd=BACKEND, env=env)
+    host = env.get("WEB_ADMIN_HOST", "0.0.0.0")
+    port = env.get("WEB_ADMIN_PORT", "18700")
+    workers = env.get("WEB_ADMIN_WORKERS", "1")
+    log_level = env.get("WEB_ADMIN_LOG_LEVEL", "info")
+    run(
+        [
+            py,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            host,
+            "--port",
+            port,
+            "--workers",
+            workers,
+            "--log-level",
+            log_level,
+        ],
+        cwd=BACKEND,
+        env=env,
+    )
+
+
+if __name__ == "__main__":
+    main()
