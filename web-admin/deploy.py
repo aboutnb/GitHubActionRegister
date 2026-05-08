@@ -20,11 +20,15 @@ def backend_python() -> str:
     venv_python = BACKEND / ".venv" / "bin" / "python"
     if not venv_python.exists():
         run([sys.executable, "-m", "venv", ".venv"], cwd=BACKEND)
-        run([str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"], cwd=BACKEND)
+    run([str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"], cwd=BACKEND)
     return str(venv_python)
 
 
 def ensure_frontend_built() -> None:
+    if os.environ.get("WEB_ADMIN_SKIP_FRONTEND_BUILD") == "true":
+        if not (FRONTEND / "dist" / "index.html").exists():
+            raise SystemExit("已设置跳过前端构建，但 frontend/dist 不存在")
+        return
     if not (FRONTEND / "node_modules").exists():
         run(["npm", "install"], cwd=FRONTEND)
     run(["npm", "run", "build"], cwd=FRONTEND)
