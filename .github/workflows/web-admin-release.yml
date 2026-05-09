@@ -18,22 +18,26 @@ jobs:
             target_os: linux
             target_arch: amd64
             node_version: "20"
-            python_build_version: "3.11"
             manylinux_image: quay.io/pypa/manylinux2014_x86_64
+            pbs_arch: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             target_os: linux
             target_arch: arm64
             node_version: "20"
-            python_build_version: "3.11"
             manylinux_image: quay.io/pypa/manylinux2014_aarch64
+            pbs_arch: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
+
+    env:
+      PBS_RELEASE: "20260414"
+      PBS_PYTHON: "3.11.13"
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python_build_version }}
+          python-version: "3.11"
 
       - name: Verify backend Python compatibility
         run: |
@@ -65,11 +69,28 @@ jobs:
           docker run --rm \
             -v "$PWD:/work" \
             -w /work \
+            -e PBS_RELEASE="${PBS_RELEASE}" \
+            -e PBS_PYTHON="${PBS_PYTHON}" \
+            -e PBS_ARCH="${{ matrix.pbs_arch }}" \
             ${{ matrix.manylinux_image }} \
             /bin/bash -lc "
-              /opt/python/cp311-cp311/bin/python -m pip install --upgrade pip &&
-              /opt/python/cp311-cp311/bin/python -m pip install -r web-admin/backend/requirements.txt pyinstaller &&
-              /opt/python/cp311-cp311/bin/python web-admin/build_backend_bundle.py --target-os ${{ matrix.target_os }} --target-arch ${{ matrix.target_arch }}
+              set -euo pipefail &&
+              ARCHIVE=cpython-\${PBS_PYTHON}+\${PBS_RELEASE}-\${PBS_ARCH}-install_only.tar.gz &&
+              URL=https://github.com/astral-sh/python-build-standalone/releases/download/\${PBS_RELEASE}/\${ARCHIVE} &&
+              curl -fsSL \"\${URL}\" -o /tmp/python-build-standalone.tar.gz &&
+              rm -rf /tmp/python-build-standalone &&
+              mkdir -p /tmp/python-build-standalone &&
+              tar -xzf /tmp/python-build-standalone.tar.gz -C /tmp/python-build-standalone &&
+              PYBIN=\$(find /tmp/python-build-standalone -path '*/bin/python3.11' | head -n 1) &&
+              if [ -z \"\${PYBIN}\" ]; then
+                echo 'python-build-standalone python3.11 not found' >&2
+                exit 1
+              fi &&
+              export LD_LIBRARY_PATH=\"\$(dirname \"\${PYBIN}\")/../lib:\${LD_LIBRARY_PATH:-}\" &&
+              \"\${PYBIN}\" -m ensurepip --upgrade &&
+              \"\${PYBIN}\" -m pip install --upgrade pip &&
+              \"\${PYBIN}\" -m pip install -r web-admin/backend/requirements.txt pyinstaller &&
+              \"\${PYBIN}\" web-admin/build_backend_bundle.py --target-os ${{ matrix.target_os }} --target-arch ${{ matrix.target_arch }}
             "
 
       - name: Package release archive
