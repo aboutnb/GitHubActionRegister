@@ -1,0 +1,15 @@
+[Unit]
+Description=Web Admin Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__TARGET_DIR__
+EnvironmentFile=__TARGET_DIR__/backend/.env
+ExecStart=__TARGET_DIR__/backend/.venv/bin/python __TARGET_DIR__/deploy.py serve
+Restart=always
+RestartSec=5
+User=__SERVICE_USER__
+
+[Install]
+WantedBy=multi-user.target

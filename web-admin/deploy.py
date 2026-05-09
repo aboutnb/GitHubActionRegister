@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -43,16 +44,19 @@ def prepare_env() -> dict[str, str]:
     return env
 
 
-def main() -> None:
+def prepare_runtime(env: dict[str, str]) -> None:
     os.chdir(ROOT)
-    if not (FRONTEND / "node_modules").exists():
-        run(["npm", "install"], cwd=FRONTEND)
-    ensure_frontend_built()
-    env = prepare_env()
     py = backend_python()
+    ensure_frontend_built()
     run([py, "create_database.py"], cwd=BACKEND, env=env)
     run([py, "init_db.py"], cwd=BACKEND, env=env)
     run([py, "create_admin.py"], cwd=BACKEND, env=env)
+
+
+def serve_runtime(env: dict[str, str]) -> None:
+    py = str(BACKEND / ".venv" / "bin" / "python")
+    if not Path(py).exists():
+        raise SystemExit("backend/.venv 不存在，请先执行 prepare")
     host = env.get("WEB_ADMIN_HOST", "0.0.0.0")
     port = env.get("WEB_ADMIN_PORT", "18700")
     workers = env.get("WEB_ADMIN_WORKERS", "1")
@@ -75,6 +79,27 @@ def main() -> None:
         cwd=BACKEND,
         env=env,
     )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Deploy web admin")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="deploy",
+        choices=["deploy", "prepare", "serve"],
+        help="deploy=prepare+serve, prepare=install/init only, serve=start uvicorn only",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    env = prepare_env()
+    if args.command in {"deploy", "prepare"}:
+        prepare_runtime(env)
+    if args.command in {"deploy", "serve"}:
+        serve_runtime(env)
 
 
 if __name__ == "__main__":

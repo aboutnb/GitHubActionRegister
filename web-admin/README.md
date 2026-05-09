@@ -1,40 +1,45 @@
 # Web Admin
 
-只包含后台管理的前后端部署包。
+这是一个可直接用于生产部署的 `web-admin` 发布包，不包含桌面端。
 
-## GitHub Releases 安装
+## 生产安装
 
-发布新版本后，服务器可直接执行：
+服务器执行：
 
 ```bash
 curl -fsSL https://github.com/OWNER/REPO/releases/latest/download/install-web-admin.sh | bash
 ```
 
-安装完成后，访问：
+安装脚本会：
 
-- `http://<server-ip>:18700`
+- 下载最新 `web-admin.tar.gz`
+- 解压到 `/opt/web-admin`
+- 保留 `backend/.env`
+- 保留 `backend/.venv`
+- 执行初始化
+- 注册 `systemd` 服务
+- 启动 `web-admin`
 
-## Release 内容
-
-GitHub Release 里只打包 `web-admin/`，不包含桌面端代码。
-
-## 服务器部署流程
-
-1. 打 tag，例如 `web-admin-v1.0.0`
-2. GitHub Actions 自动生成 `web-admin.tar.gz`
-3. 服务器下载 Release 附件
-4. 解压到目标目录
-5. 执行 `deploy.sh`
-
-## 配置
-
-先复制：
+## 服务管理
 
 ```bash
-cp backend/.env.example backend/.env
+sudo systemctl status web-admin
+sudo systemctl restart web-admin
+sudo systemctl stop web-admin
+sudo journalctl -u web-admin -f
 ```
 
-至少修改：
+## 首次配置
+
+第一次执行时，如果没有 `.env`，安装脚本会先生成模板并退出。
+
+然后编辑：
+
+```bash
+sudo vim /opt/web-admin/backend/.env
+```
+
+至少设置：
 
 - `WEB_ADMIN_DATABASE_URL`
 - `WEB_ADMIN_DATABASE_ADMIN_URL`
@@ -42,9 +47,26 @@ cp backend/.env.example backend/.env
 - `WEB_ADMIN_ENCRYPT_SECRET`
 - `WEB_ADMIN_ADMIN_PASSWORD`
 
-## 说明
+配置完后执行：
 
-- 前端已内置到后端静态发布
-- Release 包不带 `backend/.env`
-- Release 包不带 `backend/.venv`
-- Release 包不带 `frontend/node_modules`
+```bash
+curl -fsSL https://github.com/OWNER/REPO/releases/latest/download/install-web-admin.sh | bash
+```
+
+## 发布方式
+
+推送 tag：
+
+```bash
+git tag web-admin-v1.0.0
+git push origin web-admin-v1.0.0
+```
+
+GitHub Actions 会只打包 `web-admin/`，生成：
+
+- `web-admin.tar.gz`
+- `install-web-admin.sh`
+
+## 访问
+
+- `http://<server-ip>:18700`
