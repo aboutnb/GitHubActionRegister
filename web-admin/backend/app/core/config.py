@@ -11,9 +11,11 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
+from app.runtime import backend_dir, env_file
 
-BACKEND_DIR = Path(__file__).resolve().parents[2]
-ENV_FILE = BACKEND_DIR / ".env"
+
+BACKEND_DIR = backend_dir()
+ENV_FILE = env_file()
 
 
 class Settings(BaseSettings):

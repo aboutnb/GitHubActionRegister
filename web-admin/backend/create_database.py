@@ -1,4 +1,3 @@
-import os
 from urllib.parse import urlparse
 
 from sqlalchemy import create_engine, text
@@ -6,24 +5,14 @@ from sqlalchemy import create_engine, text
 from app.core.config import get_settings
 
 
-def _to_admin_url(database_url: str) -> str:
-    parsed = urlparse(database_url)
-    if parsed.scheme not in {"postgresql", "postgresql+psycopg", "postgresql+psycopg2"}:
-        raise SystemExit("仅支持 PostgreSQL 自动建库")
-    if not parsed.hostname:
-        raise SystemExit("数据库地址无效")
-    username = parsed.username or "postgres"
-    password = parsed.password or ""
-    host = parsed.hostname
-    port = parsed.port or 5432
-    admin_database = os.environ.get("WEB_ADMIN_DATABASE_ADMIN_DATABASE", "postgres")
-    return f"postgresql+psycopg://{username}:{password}@{host}:{port}/{admin_database}"
-
-
 def main() -> None:
     settings = get_settings()
+    if not settings.database_bootstrap:
+        print("database bootstrap disabled, skip create_database")
+        return
     if not settings.database_admin_url:
-        raise SystemExit("WEB_ADMIN_DATABASE_ADMIN_URL 未配置，无法自动建库")
+        print("database admin url not configured, skip create_database")
+        return
 
     parsed = urlparse(settings.database_url or "")
     if parsed.scheme not in {"postgresql", "postgresql+psycopg", "postgresql+psycopg2"}:

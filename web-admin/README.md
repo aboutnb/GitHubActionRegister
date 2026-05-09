@@ -1,6 +1,7 @@
 # Web Admin
 
-这是一个可直接用于生产部署的 `web-admin` 发布包，不包含桌面端。
+这是一个可直接用于生产部署的 `web-admin` Linux 发布包，不包含桌面端。
+后端使用 PyInstaller 打包，Release 中不再直接包含后端 Python 源码。
 
 ## 生产安装
 
@@ -12,13 +13,18 @@ curl -fsSL https://github.com/OWNER/REPO/releases/latest/download/install-web-ad
 
 安装脚本会：
 
-- 下载最新 `web-admin.tar.gz`
+- 自动识别服务器是 `amd64` 还是 `arm64`
+- 下载对应的 `web-admin-linux-<arch>.tar.gz`
 - 解压到 `/opt/web-admin`
 - 保留 `backend/.env`
-- 保留 `backend/.venv`
 - 执行初始化
 - 注册 `systemd` 服务
 - 启动 `web-admin`
+
+当前正式支持的发布产物：
+
+- Linux AMD64
+- Linux ARM64
 
 ## 服务管理
 
@@ -42,10 +48,18 @@ sudo vim /opt/web-admin/backend/.env
 至少设置：
 
 - `WEB_ADMIN_DATABASE_URL`
-- `WEB_ADMIN_DATABASE_ADMIN_URL`
 - `WEB_ADMIN_JWT_SECRET`
 - `WEB_ADMIN_ENCRYPT_SECRET`
 - `WEB_ADMIN_ADMIN_PASSWORD`
+
+常见可选项：
+
+- `WEB_ADMIN_DATABASE_BOOTSTRAP=false`
+  - 数据库已经存在，或者当前数据库用户没有建库权限时使用
+- `WEB_ADMIN_DATABASE_ADMIN_URL`
+  - 需要单独提供高权限连接来自动建库时使用
+- `WEB_ADMIN_PORT`
+  - 需要修改服务端口时使用
 
 配置完后执行：
 
@@ -64,7 +78,8 @@ git push origin web-admin-v1.0.0
 
 GitHub Actions 会只打包 `web-admin/`，生成：
 
-- `web-admin.tar.gz`
+- `web-admin-linux-amd64.tar.gz`
+- `web-admin-linux-arm64.tar.gz`
 - `install-web-admin.sh`
 
 ## 访问

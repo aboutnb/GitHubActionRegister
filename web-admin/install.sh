@@ -9,8 +9,29 @@ SERVICE_NAME="${WEB_ADMIN_SERVICE_NAME:-web-admin}"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 SERVICE_USER="${WEB_ADMIN_SERVICE_USER:-$(id -un)}"
 
-ARCHIVE_URL="https://github.com/${REPO}/releases/latest/download/web-admin.tar.gz"
-ARCHIVE_PATH="${TMP_DIR}/web-admin.tar.gz"
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "install-web-admin.sh only supports Linux." >&2
+  exit 1
+fi
+
+ARCH_NAME="$(uname -m)"
+
+case "$ARCH_NAME" in
+  x86_64|amd64)
+    ARCH_TAG="amd64"
+    ;;
+  aarch64|arm64)
+    ARCH_TAG="arm64"
+    ;;
+  *)
+    echo "unsupported Linux architecture: $ARCH_NAME" >&2
+    exit 1
+    ;;
+esac
+
+ARCHIVE_NAME="web-admin-linux-${ARCH_TAG}.tar.gz"
+ARCHIVE_URL="https://github.com/${REPO}/releases/latest/download/${ARCHIVE_NAME}"
+ARCHIVE_PATH="${TMP_DIR}/${ARCHIVE_NAME}"
 
 curl -fsSL "$ARCHIVE_URL" -o "$ARCHIVE_PATH"
 sudo mkdir -p "$(dirname "$TARGET_DIR")"
@@ -19,7 +40,6 @@ sudo mkdir -p "$TARGET_DIR"
 if [[ -d "$TARGET_DIR/backend" ]]; then
   sudo find "$TARGET_DIR/backend" -mindepth 1 -maxdepth 1 \
     ! -name '.env' \
-    ! -name '.venv' \
     -exec rm -rf {} +
 fi
 if [[ -d "$TARGET_DIR/frontend" ]]; then
@@ -36,11 +56,12 @@ sudo tar -xzf "$ARCHIVE_PATH" -C "$TARGET_DIR" --strip-components=1
 
 cd "$TARGET_DIR"
 if [[ ! -f "$TARGET_DIR/backend/.env" ]]; then
-  cp "$TARGET_DIR/backend/.env.example" "$TARGET_DIR/backend/.env"
+  sudo cp "$TARGET_DIR/backend/.env.example" "$TARGET_DIR/backend/.env"
   echo "created $TARGET_DIR/backend/.env from template, please edit it and rerun installer" >&2
   exit 1
 fi
-WEB_ADMIN_SKIP_FRONTEND_BUILD=true ./deploy.sh prepare
+
+"$TARGET_DIR/backend/runtime/web-admin-backend" prepare
 
 sed \
   -e "s|__TARGET_DIR__|${TARGET_DIR}|g" \
