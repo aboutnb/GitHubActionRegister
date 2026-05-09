@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from sqlalchemy import BigInteger, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column

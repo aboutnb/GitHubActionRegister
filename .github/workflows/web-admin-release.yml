@@ -15,6 +15,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Verify backend Python 3.9 compatibility
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          for path in Path("web-admin").rglob("*.py"):
+              ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 9))
+          print("python3.9 syntax ok")
+          PY
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
