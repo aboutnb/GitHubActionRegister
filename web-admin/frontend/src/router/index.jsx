@@ -7,13 +7,14 @@ import AuditLogsPage from '../pages/AuditLogsPage';
 import BatchesPage from '../pages/BatchesPage';
 import ClientsPage from '../pages/ClientsPage';
 import DashboardPage from '../pages/DashboardPage';
+import ForceChangePasswordPage from '../pages/ForceChangePasswordPage';
 import GitHubAccountsPage from '../pages/GitHubAccountsPage';
 import LoginPage from '../pages/LoginPage';
 import LogsPage from '../pages/LogsPage';
 import MailAccountsPage from '../pages/MailAccountsPage';
 
 function RequireAuth({ children }) {
-  const { user, checking } = useAuth();
+  const { user, checking, mustChangePassword } = useAuth();
   if (checking) {
     return (
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
@@ -21,7 +22,31 @@ function RequireAuth({ children }) {
       </div>
     );
   }
-  return user ? children : <Navigate to="/login" replace />;
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  if (mustChangePassword) {
+    return <Navigate to="/force-change-password" replace />;
+  }
+  return children;
+}
+
+function RequirePasswordReset({ children }) {
+  const { user, checking, mustChangePassword } = useAuth();
+  if (checking) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+        <Spin size="large" />
+      </div>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  if (!mustChangePassword) {
+    return <Navigate to="/" replace />;
+  }
+  return children;
 }
 
 export default function AppRouter() {
@@ -30,6 +55,14 @@ export default function AppRouter() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/force-change-password"
+            element={
+              <RequirePasswordReset>
+                <ForceChangePasswordPage />
+              </RequirePasswordReset>
+            }
+          />
           <Route
             path="/"
             element={

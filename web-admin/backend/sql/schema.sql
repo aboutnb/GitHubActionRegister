@@ -6,10 +6,14 @@ CREATE TABLE IF NOT EXISTS asset_center.web_users (
   password_hash TEXT NOT NULL,
   role VARCHAR(32) NOT NULL CHECK (role IN ('admin', 'operator', 'viewer')),
   status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
   last_login_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE asset_center.web_users
+  ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS asset_center.desktop_clients (
   id BIGSERIAL PRIMARY KEY,

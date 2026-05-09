@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import Cookie, Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/admin/auth/login", auto_erro
 
 
 def get_current_user(
+    request: Request,
     bearer_token: str | None = Depends(oauth2_scheme),
     cookie_token: str | None = Cookie(default=None, alias="web_admin_token"),
     db: Session = Depends(get_db),
@@ -33,6 +34,12 @@ def get_current_user(
     user = db.query(WebUser).filter(WebUser.username == username, WebUser.status == "active").first()
     if not user:
         raise credentials_error
+    path = request.url.path if request else ""
+    if user.must_change_password and not path.endswith("/admin/auth/me") and not path.endswith("/admin/auth/change-password"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password change required",
+        )
     return user
 
 

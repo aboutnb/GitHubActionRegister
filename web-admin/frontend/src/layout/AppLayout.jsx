@@ -13,6 +13,7 @@ import {
 import { Avatar, Button, Space, Tag } from 'antd';
 import { ProLayout } from '@ant-design/pro-components';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { BrandLockup } from '../components/BrandLogo';
 import { logout } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
@@ -57,13 +58,7 @@ export default function AppLayout({ children }) {
       fixedHeader
       siderWidth={248}
       headerTitleRender={() => (
-        <div className="layout-brand" onClick={() => navigate('/')}>
-          <span className="layout-brand__mark">AC</span>
-          <div className="layout-brand__text">
-            <strong>Asset Center</strong>
-            <span>GitHub 资产中控台</span>
-          </div>
-        </div>
+        <BrandLockup size="md" title="Asset Center" subtitle="GitHub 资产中控台" onClick={() => navigate('/')} />
       )}
       avatarProps={{
         title: role.toUpperCase(),

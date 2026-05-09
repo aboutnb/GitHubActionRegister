@@ -1,6 +1,6 @@
 services:
   web-admin:
-    image: ghcr.io/aboutnb/github-action-web-admin:latest
+    image: ghcr.io/aboutnb/gh-asset-center-web:latest
     container_name: web-admin
     restart: unless-stopped
     ports:

@@ -27,6 +27,7 @@ export function AuthProvider({ children }) {
   const value = useMemo(
     () => ({
       user,
+      mustChangePassword: Boolean(user?.must_change_password),
       checking,
       setUser,
       refreshUser,

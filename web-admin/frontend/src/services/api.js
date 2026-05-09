@@ -3,6 +3,7 @@ import http from './http';
 export const login = (payload) => http.post('/admin/auth/login', payload);
 export const logout = () => http.post('/admin/auth/logout');
 export const fetchCurrentUser = () => http.get('/admin/auth/me');
+export const changePassword = (payload) => http.post('/admin/auth/change-password', payload);
 export const fetchDashboardSummary = () => http.get('/admin/dashboard/summary');
 export const fetchMailAccounts = (params) => http.get('/admin/mail-accounts', { params });
 export const importMailAccounts = (payload) => http.post('/admin/mail-accounts/import', payload);

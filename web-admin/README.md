@@ -11,25 +11,22 @@
 
 镜像地址：
 
-- `ghcr.io/aboutnb/github-action-web-admin:latest`
-- `ghcr.io/aboutnb/github-action-web-admin:web-admin-vX.Y.Z`
+- `ghcr.io/aboutnb/gh-asset-center-web:latest`
+- `ghcr.io/aboutnb/gh-asset-center-web:web-admin-vX.Y.Z`
 
 ## 生产安装
 
 服务器执行：
 
 ```bash
-curl -fsSL https://github.com/aboutnb/GitHubAction/releases/latest/download/install-web-admin.sh | bash
+curl -fsSL https://github.com/aboutnb/GitHubActionRegister/releases/latest/download/install-web-admin.sh | bash
 ```
 
 如果希望真正一条命令完成首次部署，直接把配置作为安装脚本参数传进去：
 
 ```bash
-curl -fsSL https://github.com/aboutnb/GitHubAction/releases/latest/download/install-web-admin.sh | bash -s -- \
-  --database-url 'postgresql+psycopg://postgres:123456@127.0.0.1:5432/github_asset_center' \
-  --jwt-secret 'replace-with-a-long-random-secret' \
-  --encrypt-secret 'replace-with-a-different-long-random-secret' \
-  --admin-password 'replace-with-a-strong-password'
+curl -fsSL https://github.com/aboutnb/GitHubActionRegister/releases/latest/download/install-web-admin.sh | bash -s -- \
+  --database-url 'postgresql+psycopg://postgres:123456@127.0.0.1:5432/github_asset_center'
 ```
 
 安装脚本会：
@@ -46,6 +43,7 @@ curl -fsSL https://github.com/aboutnb/GitHubAction/releases/latest/download/inst
 
 - 如果你已经通过安装脚本参数传入核心配置，则直接写入 `.env` 并继续部署
 - 否则生成模板并退出，等你编辑后再次执行
+- 模板里的 `WEB_ADMIN_JWT_SECRET` / `WEB_ADMIN_ENCRYPT_SECRET` 即使留空，重新执行安装脚本时也会自动补齐
 
 然后编辑：
 
@@ -56,9 +54,27 @@ sudo vim /opt/web-admin/backend/.env
 至少设置：
 
 - `WEB_ADMIN_DATABASE_URL`
-- `WEB_ADMIN_JWT_SECRET`
-- `WEB_ADMIN_ENCRYPT_SECRET`
+- `WEB_ADMIN_PORT`
+
+可选覆盖：
+
 - `WEB_ADMIN_ADMIN_PASSWORD`
+
+默认管理员账号为：
+
+- 用户名：`admin`
+- 密码：`admin123456`
+
+首次使用默认密码登录后，系统会强制跳转到改密页面；在修改完成前，其他后台接口不可访问。
+
+默认服务端口为：
+
+- `18700`
+
+默认安装行为：
+
+- `WEB_ADMIN_JWT_SECRET` 首次一键部署时自动生成
+- `WEB_ADMIN_ENCRYPT_SECRET` 首次一键部署时自动生成
 
 常见可选项：
 
@@ -72,17 +88,14 @@ sudo vim /opt/web-admin/backend/.env
 配置完后再次执行：
 
 ```bash
-curl -fsSL https://github.com/aboutnb/GitHubAction/releases/latest/download/install-web-admin.sh | bash
+curl -fsSL https://github.com/aboutnb/GitHubActionRegister/releases/latest/download/install-web-admin.sh | bash
 ```
 
 如果数据库已经提前建好，推荐首次就带上：
 
 ```bash
-curl -fsSL https://github.com/aboutnb/GitHubAction/releases/latest/download/install-web-admin.sh | bash -s -- \
+curl -fsSL https://github.com/aboutnb/GitHubActionRegister/releases/latest/download/install-web-admin.sh | bash -s -- \
   --database-url 'postgresql+psycopg://postgres:123456@127.0.0.1:5432/github_asset_center' \
-  --jwt-secret 'replace-with-a-long-random-secret' \
-  --encrypt-secret 'replace-with-a-different-long-random-secret' \
-  --admin-password 'replace-with-a-strong-password' \
   --database-bootstrap false
 ```
 
@@ -118,8 +131,8 @@ git push origin web-admin-v1.0.0
 
 GitHub Actions 会构建并推送：
 
-- `ghcr.io/aboutnb/github-action-web-admin:latest`
-- `ghcr.io/aboutnb/github-action-web-admin:web-admin-v1.0.0`
+- `ghcr.io/aboutnb/gh-asset-center-web:latest`
+- `ghcr.io/aboutnb/gh-asset-center-web:web-admin-v1.0.0`
 - `install-web-admin.sh` Release 资产
 
 ## 访问

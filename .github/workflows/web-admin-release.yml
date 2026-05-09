@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: aboutnb/github-action-web-admin
+  IMAGE_NAME: aboutnb/gh-asset-center-web
 
 permissions:
   contents: write
@@ -67,9 +67,103 @@ jobs:
         run: |
           sed "s|__IMAGE__|${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}|g" web-admin/install.sh > install-web-admin.sh
 
+      - name: Generate release notes
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cat > release-notes.md <<EOF
+          # Web Admin ${RELEASE_TAG}
+
+          面向 Linux 服务器的后台管理 Docker 发布版本，仅包含 \`web-admin\`，不包含桌面端。
+
+          ## 本次发布包含
+
+          - 多架构 Docker 镜像
+          - 一键安装脚本 \`install-web-admin.sh\`
+          - 后端与前端一体部署
+          - 默认管理员首次登录强制改密
+
+          ## Docker 镜像
+
+          - \`${REGISTRY}/${IMAGE_NAME}:${RELEASE_TAG}\`
+          - \`${REGISTRY}/${IMAGE_NAME}:latest\`
+
+          支持架构：
+
+          - \`linux/amd64\`
+          - \`linux/arm64\`
+
+          ## 一键部署
+
+          首次部署推荐直接传数据库连接，安装脚本会自动生成 \`JWT\` / \`ENCRYPT\` secret：
+
+          \`\`\`bash
+          curl -fsSL https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/install-web-admin.sh | bash -s -- \\
+            --database-url 'postgresql+psycopg://postgres:123456@127.0.0.1:5432/github_asset_center'
+          \`\`\`
+
+          如果数据库已经提前建好，建议加上：
+
+          \`\`\`bash
+          curl -fsSL https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/install-web-admin.sh | bash -s -- \\
+            --database-url 'postgresql+psycopg://postgres:123456@127.0.0.1:5432/github_asset_center' \\
+            --database-bootstrap false
+          \`\`\`
+
+          如果只想先生成配置模板：
+
+          \`\`\`bash
+          curl -fsSL https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/install-web-admin.sh | bash
+          \`\`\`
+
+          ## 默认行为
+
+          - 默认管理员用户名：\`admin\`
+          - 默认管理员密码：\`admin123456\`
+          - 默认服务端口：\`18700\`
+          - 首次一键部署时自动生成：
+            - \`WEB_ADMIN_JWT_SECRET\`
+            - \`WEB_ADMIN_ENCRYPT_SECRET\`
+          - 默认密码登录后必须先修改密码，修改完成前其他后台接口不可访问
+
+          ## 安装脚本会做什么
+
+          - 创建 \`/opt/web-admin/backend/.env\`
+          - 创建 \`/opt/web-admin/docker-compose.yml\`
+          - 拉取对应版本 Docker 镜像
+          - 使用 Docker Compose 启动容器
+          - 等待健康检查通过并输出访问地址
+
+          ## 运行要求
+
+          - 操作系统：Linux 服务器
+          - Docker
+          - Docker Compose
+          - PostgreSQL
+
+          ## 访问地址
+
+          - \`http://<server-ip>:18700\`
+
+          ## 管理命令
+
+          \`\`\`bash
+          docker ps
+          docker logs -f web-admin
+          docker restart web-admin
+          docker stop web-admin
+          \`\`\`
+
+          ## 说明
+
+          - 该版本只发布 \`web-admin\`
+          - 如果 GHCR 包被设置为私有，需要先执行 \`docker login ghcr.io\`
+          EOF
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             install-web-admin.sh
-          generate_release_notes: true
+          body_path: release-notes.md

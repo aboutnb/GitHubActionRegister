@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { LockOutlined, SafetyCertificateOutlined, UserOutlined } from '@ant-design/icons';
 import { Button, Card, Form, Input, Typography, message } from 'antd';
+import { BrandLockup } from '../components/BrandLogo';
 import { login } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
@@ -11,9 +12,9 @@ export default function LoginPage() {
   const handleFinish = async (values) => {
     setLoading(true);
     try {
-      await login(values);
-      await refreshUser();
-      window.location.href = '/';
+      const { data } = await login(values);
+      const user = await refreshUser();
+      window.location.href = data?.must_change_password || user?.must_change_password ? '/force-change-password' : '/';
     } catch (error) {
       message.error(error?.response?.data?.detail || '登录失败');
     } finally {
@@ -25,6 +26,11 @@ export default function LoginPage() {
     <div className="login-shell">
       <div className="login-shell__panel">
         <div className="login-shell__intro">
+          <BrandLockup
+            size="xl"
+            title="GitHub Asset Center"
+            subtitle="统一收口邮箱资产、GitHub 成品账号、客户端密钥与审计批次"
+          />
           <span className="login-shell__eyebrow">Asset Command</span>
           <Typography.Title level={2}>登录资产管理后台</Typography.Title>
           <Typography.Paragraph>

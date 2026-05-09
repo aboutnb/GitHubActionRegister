@@ -16,6 +16,9 @@ from app.runtime import backend_dir, env_file
 
 BACKEND_DIR = backend_dir()
 ENV_FILE = env_file()
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin123456"
+DEFAULT_PORT = 18700
 
 
 class Settings(BaseSettings):
@@ -28,7 +31,7 @@ class Settings(BaseSettings):
     app_name: str = "GitHub Asset Center"
     api_prefix: str = "/api"
     host: str = "0.0.0.0"
-    port: int = 18700
+    port: int = DEFAULT_PORT
     workers: int = 1
     log_level: str = "info"
     serve_frontend: bool = True
@@ -47,8 +50,8 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 720
     encrypt_secret: str = "change-me-too"
     app_env: str = "development"
-    admin_username: str = "admin"
-    admin_password: str = ""
+    admin_username: str = DEFAULT_ADMIN_USERNAME
+    admin_password: str = DEFAULT_ADMIN_PASSWORD
     mail_lease_minutes: int = 30
     cors_origins: List[str] = Field(
         default_factory=lambda: ["http://127.0.0.1:18701", "http://localhost:18701"]
