@@ -2,6 +2,7 @@
 
 这是一个可直接用于生产部署的 `web-admin` Linux 发布包，不包含桌面端。
 后端使用 PyInstaller 打包，Release 中不再直接包含后端 Python 源码。
+为兼容较老的 Linux 发行版，后端二进制会在 `manylinux2014` 基线环境中构建。
 
 ## 生产安装
 
