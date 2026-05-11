@@ -16,7 +16,7 @@ import requests
 # 常量
 # ---------------------------------------------------------------------------
 
-API_URL = "https://api.bujidian.com/getMailInfo"
+API_URL = "https://api.7gemail.com/getMailInfo"
 REQUEST_TIMEOUT = 30
 
 # 6-8 位纯数字验证码

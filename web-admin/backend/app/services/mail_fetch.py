@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 from app.schemas.mail import MailMessageItem
 from app.services.official_mail import fetch_official_mail_messages
 
-XIAOSHUIDI_API_URL = "https://api.bujidian.com/getMailInfo"
+XIAOSHUIDI_API_URL = "https://api.7gemail.com/getMailInfo"
 REQUEST_TIMEOUT = 30
 
 SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
