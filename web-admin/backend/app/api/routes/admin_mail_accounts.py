@@ -111,10 +111,6 @@ def _unique_mail_account_exists(db: Session, email: str | None) -> MailAccount |
 
 def normalize_mail_status(value: str | None) -> str:
     status = str(value or "idle").strip().lower() or "idle"
-    if status == "used":
-        return "registered"
-    if status == "leased":
-        return "idle"
     if status not in MAIL_STATUS_OPTIONS:
         raise HTTPException(status_code=400, detail="邮箱状态不正确")
     return status
@@ -148,12 +144,7 @@ def list_mail_accounts(
         )
     if status:
         normalized_status = normalize_mail_status_filter(status)
-        if normalized_status == "idle":
-            query = query.filter(MailAccount.status.in_(("idle", "leased")))
-        elif normalized_status == "registered":
-            query = query.filter(MailAccount.status.in_(("registered", "used")))
-        else:
-            query = query.filter(MailAccount.status == normalized_status)
+        query = query.filter(MailAccount.status == normalized_status)
     if receive_mode:
         normalized_mode = str(receive_mode).strip().lower()
         if normalized_mode in {"official", "xiaoshuidi"}:

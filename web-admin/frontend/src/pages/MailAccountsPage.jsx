@@ -90,8 +90,6 @@ function parseMailImportLine(line, receiveMode) {
 }
 
 function normalizeMailStatus(value) {
-  if (value === 'leased') return 'idle';
-  if (value === 'used') return 'registered';
   return value || 'idle';
 }
 

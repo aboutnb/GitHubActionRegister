@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS asset_center.desktop_clients (
 CREATE TABLE IF NOT EXISTS asset_center.mail_accounts (
   id BIGSERIAL PRIMARY KEY,
   email VARCHAR(255) NOT NULL UNIQUE,
-  status VARCHAR(32) NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'leased', 'registered', 'used', 'disabled')),
+  status VARCHAR(32) NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'registered', 'disabled')),
   lease_client_id BIGINT REFERENCES asset_center.desktop_clients(id),
   lease_token VARCHAR(128),
   lease_expires_at TIMESTAMPTZ,

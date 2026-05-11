@@ -38,17 +38,9 @@ def summary(
     db: Session = Depends(get_db),
 ) -> DashboardResponse:
     total_mail = db.query(func.count(MailAccount.id)).scalar() or 0
-    idle_mail = (
-        db.query(func.count(MailAccount.id))
-        .filter(MailAccount.status.in_(("idle", "leased")))
-        .scalar()
-        or 0
-    )
+    idle_mail = db.query(func.count(MailAccount.id)).filter(MailAccount.status == "idle").scalar() or 0
     registered_mail = (
-        db.query(func.count(MailAccount.id))
-        .filter(MailAccount.status.in_(("registered", "used")))
-        .scalar()
-        or 0
+        db.query(func.count(MailAccount.id)).filter(MailAccount.status == "registered").scalar() or 0
     )
     disabled_mail = db.query(func.count(MailAccount.id)).filter(MailAccount.status == "disabled").scalar() or 0
     total_github = db.query(func.count(GitHubAccount.id)).scalar() or 0
