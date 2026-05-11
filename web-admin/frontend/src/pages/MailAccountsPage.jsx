@@ -41,17 +41,13 @@ import { formatDateTime } from '../utils/datetime';
 
 const statusColor = {
   idle: 'blue',
-  leased: 'gold',
   registered: 'cyan',
-  used: 'green',
   disabled: 'default',
 };
 
 const statusOptions = [
-  { label: '待分配', value: 'idle' },
-  { label: '租约中', value: 'leased' },
+  { label: '未注册', value: 'idle' },
   { label: '已注册', value: 'registered' },
-  { label: '已使用', value: 'used' },
   { label: '禁用', value: 'disabled' },
 ];
 
@@ -93,10 +89,17 @@ function parseMailImportLine(line, receiveMode) {
   return { email, password, receive_mode: receiveMode };
 }
 
+function normalizeMailStatus(value) {
+  if (value === 'leased') return 'idle';
+  if (value === 'used') return 'registered';
+  return value || 'idle';
+}
+
 export default function MailAccountsPage() {
   const [filters, setFilters] = usePersistentState('mail_accounts_filters', {
     query: '',
     statusFilter: undefined,
+    receiveModeFilter: undefined,
     sortBy: undefined,
     sortOrder: undefined,
   });
@@ -116,6 +119,7 @@ export default function MailAccountsPage() {
   const [loading, setLoading] = useState(false);
   const query = filters.query;
   const statusFilter = filters.statusFilter;
+  const receiveModeFilter = filters.receiveModeFilter;
   const sortBy = filters.sortBy;
   const sortOrder = filters.sortOrder;
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
@@ -137,12 +141,14 @@ export default function MailAccountsPage() {
     pageSize = pagination.pageSize,
     nextQuery = query,
     nextStatus = statusFilter,
+    nextReceiveMode = receiveModeFilter,
   ) => {
     const { data } = await fetchMailAccounts({
       page,
       page_size: pageSize,
       q: nextQuery || undefined,
       status: nextStatus || undefined,
+      receive_mode: nextReceiveMode || undefined,
       sort_by: sortBy || undefined,
       sort_order: sortOrder || undefined,
     });
@@ -151,8 +157,8 @@ export default function MailAccountsPage() {
   };
 
   useEffect(() => {
-    loadData(1, pagination.pageSize, query, statusFilter);
-  }, [query, statusFilter, sortBy, sortOrder]);
+    loadData(1, pagination.pageSize, query, statusFilter, receiveModeFilter);
+  }, [query, statusFilter, receiveModeFilter, sortBy, sortOrder]);
 
   const openCreate = () => {
     setEditingRow(null);
@@ -367,7 +373,13 @@ export default function MailAccountsPage() {
   };
 
   const resetFilters = () => {
-    setFilters({ query: '', statusFilter: undefined, sortBy: undefined, sortOrder: undefined });
+    setFilters({
+      query: '',
+      statusFilter: undefined,
+      receiveModeFilter: undefined,
+      sortBy: undefined,
+      sortOrder: undefined,
+    });
   };
 
   const clearSelection = () => {
@@ -394,6 +406,7 @@ export default function MailAccountsPage() {
       nextPagination.pageSize,
       query,
       statusFilter,
+      receiveModeFilter,
     );
   };
 
@@ -407,14 +420,13 @@ export default function MailAccountsPage() {
         sorter: true,
         sortOrder: sortBy === 'status' ? sortOrder : null,
         render: (value) => {
+          const normalizedValue = normalizeMailStatus(value);
           const labelMap = {
-            idle: '待分配',
-            leased: '租约中',
+            idle: '未注册',
             registered: '已注册',
-            used: '已使用',
             disabled: '禁用',
           };
-          return <Tag color={statusColor[value] || 'default'}>{labelMap[value] || value}</Tag>;
+          return <Tag color={statusColor[normalizedValue] || 'default'}>{labelMap[normalizedValue] || normalizedValue}</Tag>;
         },
       },
       {
@@ -505,6 +517,14 @@ export default function MailAccountsPage() {
               options={statusOptions}
               value={statusFilter}
               onChange={(value) => setFilters((prev) => ({ ...prev, statusFilter: value }))}
+            />
+            <Select
+              allowClear
+              placeholder="收件方式"
+              style={{ width: 150 }}
+              options={receiveModeOptions}
+              value={receiveModeFilter}
+              onChange={(value) => setFilters((prev) => ({ ...prev, receiveModeFilter: value }))}
             />
             <Button onClick={resetFilters}>重置筛选</Button>
             <Popconfirm

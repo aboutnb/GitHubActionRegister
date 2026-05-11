@@ -250,6 +250,14 @@ class ImportAccountsDialog(QtWidgets.QDialog):
         self.ed_remote_token.setPlaceholderText("桌面客户端 Token")
         remote_layout.addRow("客户端 Token：", self.ed_remote_token)
 
+        self.cb_receive_mode = QtWidgets.QComboBox()
+        self.cb_receive_mode.addItem("小水滴收件", "xiaoshuidi")
+        self.cb_receive_mode.addItem("官方收件", "official")
+        receive_mode = str(cfg.get("mailReceiveMode", "xiaoshuidi") or "xiaoshuidi")
+        idx = self.cb_receive_mode.findData(receive_mode)
+        self.cb_receive_mode.setCurrentIndex(idx if idx >= 0 else 0)
+        remote_layout.addRow("取件方式：", self.cb_receive_mode)
+
         mode_box = QtWidgets.QWidget()
         mode_layout = QtWidgets.QHBoxLayout(mode_box)
         mode_layout.setContentsMargins(0, 0, 0, 0)
@@ -308,6 +316,7 @@ class ImportAccountsDialog(QtWidgets.QDialog):
             "webAdminClientToken": self.ed_remote_token.text().strip(),
             "remoteFetchMode": "all" if self.rb_remote_all.isChecked() else "count",
             "remoteFetchCount": self.sb_remote_count.value(),
+            "mailReceiveMode": str(self.cb_receive_mode.currentData() or "xiaoshuidi"),
         }
 
 
@@ -1258,9 +1267,10 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "剪贴板中未找到有效账号格式")
 
     def _add_accounts_from_text(self, text: str) -> int:
+        receive_mode = str(self._get_app_cfg().get("mailReceiveMode", "xiaoshuidi") or "xiaoshuidi")
         added = 0
         for line in (text or "").strip().splitlines():
-            parsed = self._parse_mail_line(line)
+            parsed = self._parse_mail_line(line, receive_mode)
             if parsed:
                 parsed["status"] = "等待"
                 self.accounts.append(parsed)

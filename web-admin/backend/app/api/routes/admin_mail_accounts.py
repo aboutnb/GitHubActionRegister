@@ -31,6 +31,8 @@ from app.utils.datetime import format_datetime
 
 router = APIRouter(prefix="/admin/mail-accounts", tags=["admin-mail-accounts"])
 
+MAIL_STATUS_OPTIONS = {"idle", "registered", "disabled"}
+
 
 def parse_mail_payload(
     *,
@@ -107,10 +109,28 @@ def _unique_mail_account_exists(db: Session, email: str | None) -> MailAccount |
     return find_mail_account_by_email(db, email)
 
 
+def normalize_mail_status(value: str | None) -> str:
+    status = str(value or "idle").strip().lower() or "idle"
+    if status == "used":
+        return "registered"
+    if status == "leased":
+        return "idle"
+    if status not in MAIL_STATUS_OPTIONS:
+        raise HTTPException(status_code=400, detail="邮箱状态不正确")
+    return status
+
+
+def normalize_mail_status_filter(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return normalize_mail_status(value)
+
+
 @router.get("")
 def list_mail_accounts(
     q: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    receive_mode: str | None = Query(default=None),
     sort_by: str | None = Query(default=None),
     sort_order: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
@@ -127,7 +147,17 @@ def list_mail_accounts(
             | MailAccount.remark.ilike(like)
         )
     if status:
-        query = query.filter(MailAccount.status == status)
+        normalized_status = normalize_mail_status_filter(status)
+        if normalized_status == "idle":
+            query = query.filter(MailAccount.status.in_(("idle", "leased")))
+        elif normalized_status == "registered":
+            query = query.filter(MailAccount.status.in_(("registered", "used")))
+        else:
+            query = query.filter(MailAccount.status == normalized_status)
+    if receive_mode:
+        normalized_mode = str(receive_mode).strip().lower()
+        if normalized_mode in {"official", "xiaoshuidi"}:
+            query = query.filter(MailCredential.receive_mode == normalized_mode)
 
     total = query.with_entities(func.count(MailAccount.id.distinct())).scalar() or 0
     sort_map = {
@@ -277,7 +307,7 @@ def create_mail_account(
 
     account = MailAccount(
         email=parsed["email"],
-        status=payload.status,
+        status=normalize_mail_status(payload.status),
         remark=payload.remark,
     )
     db.add(account)
@@ -351,7 +381,7 @@ def update_mail_account(
         raise HTTPException(status_code=400, detail="邮箱已存在")
 
     account.email = payload.email
-    account.status = payload.status
+    account.status = normalize_mail_status(payload.status)
     account.remark = payload.remark
     credential = account.credential
     if payload.password:
@@ -533,10 +563,11 @@ def bulk_update_mail_status(
     current_user: WebUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
+    normalized_status = normalize_mail_status(payload.status)
     updated = (
         db.query(MailAccount)
         .filter(MailAccount.id.in_(payload.ids))
-        .update({MailAccount.status: payload.status}, synchronize_session=False)
+        .update({MailAccount.status: normalized_status}, synchronize_session=False)
     )
     write_audit_log(
         db,
@@ -545,7 +576,7 @@ def bulk_update_mail_status(
         action="bulk_update_mail_status",
         target_type="mail_account",
         target_id=None,
-        details={"ids": payload.ids, "status": payload.status},
+        details={"ids": payload.ids, "status": normalized_status},
     )
     db.commit()
     return {"updated": updated}

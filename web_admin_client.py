@@ -63,17 +63,22 @@ def pull_remote_mail_accounts(
     api_token: str,
     limit: int = 10,
     fetch_all: bool = False,
+    receive_mode: str | None = None,
 ) -> list[dict[str, Any]]:
     base = _normalize_base_url(base_url)
     headers = _build_client_headers(api_token)
     batch_limit = REMOTE_BATCH_LIMIT if fetch_all else max(1, min(int(limit or 10), REMOTE_BATCH_LIMIT))
 
+    normalized_mode = str(receive_mode or "").strip().lower()
     items: list[dict[str, Any]] = []
     while True:
+        params: dict[str, Any] = {"limit": batch_limit}
+        if normalized_mode in {"official", "xiaoshuidi"}:
+            params["receive_mode"] = normalized_mode
         resp = requests.get(
             f"{base}/client/mail-accounts/pull",
             headers=headers,
-            params={"limit": batch_limit},
+            params=params,
             timeout=REQUEST_TIMEOUT,
         )
         data = _parse_json_response(resp)

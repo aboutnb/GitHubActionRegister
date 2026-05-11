@@ -32,6 +32,7 @@ ALLOWED_KEEP_WINDOW_STATUSES = {"未开启2FA", "成功"}
 DEFAULT_ACCOUNT_SOURCE = "local"
 DEFAULT_REMOTE_FETCH_MODE = "count"
 DEFAULT_REMOTE_FETCH_COUNT = 10
+DEFAULT_MAIL_RECEIVE_MODE = "xiaoshuidi"
 
 
 def _clean_str(value: Any, default: str = "") -> str:
@@ -117,6 +118,10 @@ def save_config(config: dict[str, Any]) -> None:
             "accountSource": _clean_str(config.get("accountSource", current.get("accountSource", DEFAULT_ACCOUNT_SOURCE)), DEFAULT_ACCOUNT_SOURCE),
             "remoteFetchMode": _clean_str(config.get("remoteFetchMode", current.get("remoteFetchMode", DEFAULT_REMOTE_FETCH_MODE)), DEFAULT_REMOTE_FETCH_MODE),
             "remoteFetchCount": max(1, min(9999, remote_fetch_count)),
+            "mailReceiveMode": _clean_str(
+                config.get("mailReceiveMode", current.get("mailReceiveMode", DEFAULT_MAIL_RECEIVE_MODE)),
+                DEFAULT_MAIL_RECEIVE_MODE,
+            ),
             "pushGithubResult": bool(config.get("pushGithubResult", current.get("pushGithubResult", False))),
             "pushGithubWithout2fa": bool(config.get("pushGithubWithout2fa", current.get("pushGithubWithout2fa", True))),
             "keepWindowStatuses": _normalize_keep_window_statuses(
@@ -151,6 +156,10 @@ def get_app_config() -> dict[str, Any]:
         "remoteFetchCount": _normalize_positive_int(
             file_cfg.get("remoteFetchCount", DEFAULT_REMOTE_FETCH_COUNT),
             DEFAULT_REMOTE_FETCH_COUNT,
+        ),
+        "mailReceiveMode": _clean_str(
+            file_cfg.get("mailReceiveMode", DEFAULT_MAIL_RECEIVE_MODE),
+            DEFAULT_MAIL_RECEIVE_MODE,
         ),
         "pushGithubResult": bool(file_cfg.get("pushGithubResult", False)),
         "pushGithubWithout2fa": bool(file_cfg.get("pushGithubWithout2fa", True)),

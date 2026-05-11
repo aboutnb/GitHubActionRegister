@@ -29,13 +29,14 @@ router = APIRouter(prefix="/client", tags=["client"])
 def pull_mail(
     request: Request,
     limit: int = Query(10, ge=1, le=100),
+    receive_mode: str | None = Query(default=None),
     client: DesktopClient = Depends(get_current_client),
     db: Session = Depends(get_db),
 ) -> PullMailResponse:
     client.last_seen_at = datetime.now(timezone.utc)
     if request.client:
         client.last_ip = request.client.host
-    items = pull_mail_accounts(db, client, limit=limit)
+    items = pull_mail_accounts(db, client, limit=limit, receive_mode=receive_mode)
     db.commit()
     return PullMailResponse(items=items)
 

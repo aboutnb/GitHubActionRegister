@@ -50,42 +50,30 @@ def reconcile_mail_account_status(db: Session, mail_account: MailAccount) -> str
     if current_status == "disabled":
         return mail_account.status
 
-    has_used_reference = (
-        db.query(GitHubAccount.id)
-        .filter(GitHubAccount.bind_mail_account_id == mail_account.id)
-        .first()
-        is not None
-    )
     normalized_email = normalize_account_key(mail_account.email)
     has_registered_reference = bool(
-        normalized_email
-        and db.query(GitHubAccount.id)
+        db.query(GitHubAccount.id)
         .filter(
             or_(
+                GitHubAccount.bind_mail_account_id == mail_account.id,
                 func.lower(GitHubAccount.bind_email) == normalized_email,
                 func.lower(GitHubAccount.github_login) == normalized_email,
             )
         )
         .first()
+        if normalized_email
+        else db.query(GitHubAccount.id)
+        .filter(GitHubAccount.bind_mail_account_id == mail_account.id)
+        .first()
     )
 
-    if has_used_reference:
-        mail_account.status = "used"
-        mail_account.lease_client_id = None
-        mail_account.lease_token = None
-        mail_account.lease_expires_at = None
-    elif has_registered_reference:
+    if has_registered_reference:
         mail_account.status = "registered"
         mail_account.lease_client_id = None
         mail_account.lease_token = None
         mail_account.lease_expires_at = None
-    elif current_status == "leased":
-        mail_account.status = "leased"
     else:
         mail_account.status = "idle"
-        mail_account.lease_client_id = None
-        mail_account.lease_token = None
-        mail_account.lease_expires_at = None
     return mail_account.status
 
 

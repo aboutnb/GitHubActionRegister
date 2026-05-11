@@ -24,15 +24,22 @@ const stats = [
   },
   {
     key: 'idle_mail_accounts',
-    label: '可分配邮箱',
-    helper: '可立即拉取',
+    label: '未注册邮箱',
+    helper: '未回传注册结果',
     icon: <CheckCircleOutlined />,
     tone: 'green',
   },
   {
-    key: 'used_mail_accounts',
-    label: '已使用邮箱',
-    helper: '已绑定或消耗',
+    key: 'registered_mail_accounts',
+    label: '已注册邮箱',
+    helper: '已回传注册结果',
+    icon: <ClockCircleOutlined />,
+    tone: 'amber',
+  },
+  {
+    key: 'disabled_mail_accounts',
+    label: '禁用邮箱',
+    helper: '人工停用',
     icon: <ClockCircleOutlined />,
     tone: 'amber',
   },
@@ -181,12 +188,12 @@ export default function DashboardPage() {
   const totalMail = getNumber(summary, 'total_mail_accounts');
   const idleMail = getNumber(summary, 'idle_mail_accounts');
   const registeredMail = getNumber(summary, 'registered_mail_accounts');
-  const usedMail = getNumber(summary, 'used_mail_accounts');
+  const disabledMail = getNumber(summary, 'disabled_mail_accounts');
   const totalGitHub = getNumber(summary, 'total_github_accounts');
   const activeGitHub = getNumber(summary, 'active_github_accounts');
   const totalClients = getNumber(summary, 'total_clients');
   const activeClients = getNumber(summary, 'active_clients');
-  const otherMail = Math.max(totalMail - idleMail - registeredMail - usedMail, 0);
+  const otherMail = Math.max(totalMail - idleMail - registeredMail - disabledMail, 0);
   const inactiveGitHub = Math.max(totalGitHub - activeGitHub, 0);
   const inactiveClients = Math.max(totalClients - activeClients, 0);
   const totalAssets = totalMail + totalGitHub + totalClients;
@@ -201,7 +208,7 @@ export default function DashboardPage() {
       title: '邮箱池',
       value: idleMail,
       total: totalMail,
-      helper: `可分配 ${idleMail} · 已注册 ${registeredMail} · 已使用 ${usedMail} · 其他 ${otherMail}`,
+      helper: `未注册 ${idleMail} · 已注册 ${registeredMail} · 禁用 ${disabledMail} · 其他 ${otherMail}`,
       color: '#16a34a',
     },
     {

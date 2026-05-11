@@ -11,6 +11,7 @@ from app.models.desktop_client import DesktopClient
 from app.models.github_account import GitHubAccount
 from app.models.github_credential import GitHubCredential
 from app.models.mail_account import MailAccount
+from app.models.mail_credential import MailCredential
 from app.models.sync_batch import SyncBatch
 from app.models.sync_log import SyncLog
 from app.schemas.client import PullMailItem, PushGitHubItem
@@ -22,17 +23,29 @@ from app.services.account_linking import (
 from app.services.audit import write_audit_log
 
 
-def pull_mail_accounts(db: Session, client: DesktopClient, limit: int) -> list[PullMailItem]:
+def pull_mail_accounts(
+    db: Session,
+    client: DesktopClient,
+    limit: int,
+    receive_mode: str | None = None,
+) -> list[PullMailItem]:
     settings = get_settings()
     now = datetime.now(timezone.utc)
     lease_until = now + timedelta(minutes=settings.mail_lease_minutes)
-    accounts = (
+    normalized_mode = str(receive_mode or "").strip().lower()
+    query = (
         db.query(MailAccount)
+        .join(MailAccount.credential)
         .filter(MailAccount.status == "idle")
+        .filter(
+            (MailAccount.lease_expires_at.is_(None))
+            | (MailAccount.lease_expires_at <= now)
+        )
         .order_by(MailAccount.id.asc())
-        .limit(limit)
-        .all()
     )
+    if normalized_mode in {"official", "xiaoshuidi"}:
+        query = query.filter(MailCredential.receive_mode == normalized_mode)
+    accounts = query.limit(limit).all()
 
     items: list[PullMailItem] = []
     for account in accounts:
@@ -40,7 +53,6 @@ def pull_mail_accounts(db: Session, client: DesktopClient, limit: int) -> list[P
         if not credential:
             continue
         lease_token = uuid4().hex
-        account.status = "leased"
         account.lease_client_id = client.id
         account.lease_token = lease_token
         account.lease_expires_at = lease_until
@@ -64,7 +76,10 @@ def pull_mail_accounts(db: Session, client: DesktopClient, limit: int) -> list[P
             payload_count=len(items),
             success_count=len(items),
             failed_count=0,
-            message=f"Pulled {len(items)} mail accounts",
+            message=(
+                f"Pulled {len(items)} mail accounts"
+                + (f" [{normalized_mode}]" if normalized_mode else "")
+            ),
         )
     )
     db.flush()

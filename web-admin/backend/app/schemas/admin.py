@@ -7,7 +7,7 @@ class DashboardResponse(BaseModel):
     total_mail_accounts: int
     idle_mail_accounts: int
     registered_mail_accounts: int
-    used_mail_accounts: int
+    disabled_mail_accounts: int
     total_github_accounts: int
     active_github_accounts: int
     total_clients: int

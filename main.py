@@ -238,7 +238,7 @@ def _open_path_default_app(path: str) -> None:
 # 解析工具
 # ---------------------------------------------------------------------------
 
-def _parse_mail_line(line: str) -> Optional[dict[str, str]]:
+def _parse_mail_line(line: str, receive_mode: str = "xiaoshuidi") -> Optional[dict[str, str]]:
     """
     解析单行账号信息（小水滴 API 取件）。
     以 ---- 分割，取前两段作为邮箱和密码，其余忽略。
@@ -246,10 +246,22 @@ def _parse_mail_line(line: str) -> Optional[dict[str, str]]:
     raw_line = (line or "").strip()
     if not raw_line:
         return None
-    parts = raw_line.split(SEP)
-    if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
-        # raw: 保留导入原始整行（可能含 UUID/token 等后续段），用于失败纯净导出
-        return {"email": parts[0].strip(), "password": parts[1].strip(), "raw": raw_line}
+    parts = [part.strip() for part in raw_line.split(SEP)]
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        parsed: dict[str, str] = {
+            "email": parts[0],
+            "password": parts[1],
+            "raw": raw_line,
+            "receive_mode": str(receive_mode or "xiaoshuidi").strip().lower() or "xiaoshuidi",
+        }
+        if parsed["receive_mode"] == "official":
+            if len(parts) >= 4 and parts[2] and parts[3]:
+                parsed["client_id"] = parts[2]
+                parsed["access_token"] = parts[3]
+        elif len(parts) >= 4 and parts[-2] and parts[-1]:
+            parsed["client_id"] = parts[-2]
+            parsed["access_token"] = parts[-1]
+        return parsed
     return None
 
 
@@ -270,6 +282,7 @@ def _pull_remote_accounts_for_ui(options: dict[str, Any]) -> list[dict[str, Any]
         api_token=api_token,
         limit=limit,
         fetch_all=fetch_all,
+        receive_mode=str(merged.get("mailReceiveMode") or "").strip().lower() or None,
     )
 
 

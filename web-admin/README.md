@@ -63,7 +63,7 @@ sudo vim /opt/web-admin/backend/.env
 默认管理员账号为：
 
 - 用户名：`admin`
-- 密码：`admin123456`
+- 密码：以服务器 `/opt/web-admin/backend/.env` 中的 `WEB_ADMIN_ADMIN_PASSWORD` 为准；未覆盖时默认 `admin123456`
 
 首次使用默认密码登录后，系统会强制跳转到改密页面；在修改完成前，其他后台接口不可访问。
 
