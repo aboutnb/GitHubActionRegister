@@ -39,6 +39,15 @@ def fetch_official_mail_messages(
 
     errors: list[str] = []
     fetchers: list[tuple[str, callable[[], list[OfficialFetchedMessage]]]] = []
+    logger.info(
+        "[%s] official fetch start: has_password=%s has_oauth=%s has_curl=%s client_id=%s token_prefix=%s",
+        email,
+        bool(account.password),
+        account.has_oauth,
+        has_curl_requests(),
+        bool(account.client_id),
+        (account.refresh_token or "")[:18],
+    )
     if account.has_oauth and has_curl_requests():
         fetchers.extend(
             [
@@ -51,10 +60,23 @@ def fetch_official_mail_messages(
             ("imap_old", lambda: fetch_official_via_imap(account, host=IMAP_OLD_HOST, use_oauth=account.has_oauth))
         )
 
+    logger.info(
+        "[%s] official fetch providers: %s",
+        email,
+        ",".join(provider_name for provider_name, _ in fetchers) or "none",
+    )
+
     for provider_name, fetcher in fetchers:
         try:
             raw_messages = fetcher()
             normalized = normalize_official_messages(raw_messages, recipient=email, provider=provider_name)
+            logger.info(
+                "[%s] official provider %s success: raw=%s normalized=%s",
+                email,
+                provider_name,
+                len(raw_messages),
+                len(normalized),
+            )
             note = (
                 "官方收件支持返回多封邮件，当前展示最近邮件列表；已自动尝试 Graph API / IMAP 取件。"
                 if normalized
@@ -67,7 +89,13 @@ def fetch_official_mail_messages(
                 "messages": normalized,
             }
         except Exception as exc:
-            logger.warning("[%s] official provider %s failed: %s", email, provider_name, exc)
+            logger.warning(
+                "[%s] official provider %s failed: %s (%s)",
+                email,
+                provider_name,
+                exc,
+                exc.__class__.__name__,
+            )
             errors.append(f"{provider_name}: {exc}")
 
     raise RuntimeError("官方收件失败: " + "; ".join(errors or ["未找到可用的取件方式"]))
