@@ -147,10 +147,8 @@ def _failed_file_has_tsv_header(path: str) -> bool:
                 return True
     return False
 def _get_resource_path(relative_path):
-    """ 获取资源绝对路径（兼容开发与打包后的 _MEIPASS） """
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+    """获取资源绝对路径，兼容源码运行与独立分发目录。"""
+    return os.path.join(APP_ROOT, relative_path)
 
 ICON_PATH = _get_resource_path(os.path.join("assets", "icon.png"))
 

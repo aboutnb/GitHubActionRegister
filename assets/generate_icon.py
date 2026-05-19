@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -10,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFilter
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "icon.png"
 OUT_ICO = HERE / "icon.ico"
+OUT_ICNS = HERE / "icon.icns"
 
 S = 2048
 CANVAS = (0, 0, 0, 0)
@@ -33,6 +37,54 @@ def thick_line(draw: ImageDraw.ImageDraw, p1: tuple[int, int], p2: tuple[int, in
         (x1 - dx, y1 - dy),
     ]
     draw.polygon(poly, fill=fill)
+
+
+def write_icns(source_png: Path, output_icns: Path) -> bool:
+    """在 macOS 上把 PNG 生成原生 icns，便于应用打包直接复用。"""
+    if shutil.which("iconutil") is None or shutil.which("sips") is None:
+        return False
+
+    iconset_sizes = {
+        "icon_16x16.png": 16,
+        "icon_16x16@2x.png": 32,
+        "icon_32x32.png": 32,
+        "icon_32x32@2x.png": 64,
+        "icon_128x128.png": 128,
+        "icon_128x128@2x.png": 256,
+        "icon_256x256.png": 256,
+        "icon_256x256@2x.png": 512,
+        "icon_512x512.png": 512,
+        "icon_512x512@2x.png": 1024,
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        iconset_dir = Path(tmp_dir) / "icon.iconset"
+        iconset_dir.mkdir()
+
+        for filename, size in iconset_sizes.items():
+            target = iconset_dir / filename
+            subprocess.run(
+                [
+                    "sips",
+                    "-z",
+                    str(size),
+                    str(size),
+                    str(source_png),
+                    "--out",
+                    str(target),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        subprocess.run(
+            ["iconutil", "-c", "icns", str(iconset_dir), "-o", str(output_icns)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return True
 
 
 def main() -> None:
@@ -98,6 +150,8 @@ def main() -> None:
     out.save(OUT_ICO, format="ICO", sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
     print(f"Wrote {OUT} ({out.size[0]}×{out.size[1]})")
     print(f"Wrote {OUT_ICO}")
+    if write_icns(OUT, OUT_ICNS):
+        print(f"Wrote {OUT_ICNS}")
 
 
 if __name__ == "__main__":

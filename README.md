@@ -31,18 +31,19 @@
 
 ## 打包方式
 
-本项目当前提供两套打包配置：
-
-- macOS：`GitHubRegister.spec`
-- Windows：`GitHubRegister-win.spec`
-
-统一入口脚本：
+项目已切换为 `Nuitka` 打包，统一入口脚本：
 
 ```bash
 python package_app.py
 ```
 
-`package_app.py` 会根据当前系统自动选择对应的 `.spec` 文件。
+脚本会自动根据当前系统选择对应参数：
+
+- macOS：输出 `.app` 应用包
+- Windows：输出独立分发目录和 `.exe`
+- Linux：输出独立分发目录
+
+默认是 `standalone / app-dist` 分发模式，不再依赖仓库内的 `PyInstaller .spec` 文件。
 
 ## macOS 打包
 
@@ -50,7 +51,7 @@ python package_app.py
 
 ```bash
 pip install -r requirements.txt
-pip install pyinstaller
+pip install Nuitka ordered-set zstandard
 playwright install chromium
 ```
 
@@ -66,7 +67,7 @@ python package_app.py
 dist/GitHubRegister.app
 ```
 
-### 4. 如果 macOS 提示“应用已损坏”
+### 4. 如果 macOS 提示“应用已损坏”或被阻止
 
 ```bash
 xattr -cr dist/GitHubRegister.app
@@ -82,7 +83,7 @@ xattr -cr dist/GitHubRegister.app
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-pip install pyinstaller
+pip install Nuitka ordered-set zstandard
 playwright install chromium
 ```
 
@@ -95,7 +96,7 @@ python package_app.py
 ### 3. 打包产物
 
 ```text
-dist\GitHubRegister\GitHubRegister.exe
+dist\GitHubRegister.dist\GitHubRegister.exe
 ```
 
 ## 图标资源
@@ -109,18 +110,19 @@ python assets/generate_icon.py
 会同时生成：
 
 - `assets/icon.png`：用于 macOS
+- `assets/icon.icns`：用于 macOS 应用包
 - `assets/icon.ico`：用于 Windows
 
-如果修改了图标，需要重新执行打包，新的图标才会进入应用包。
+如果修改了图标，需要重新执行打包，新的图标才会进入分发包。
 
 ## 常见问题
 
-### 1. `No module named PyInstaller`
+### 1. `No module named nuitka` 或缺少 `ordered_set` / `zstandard`
 
-说明当前 Python 环境没有安装 `PyInstaller`：
+说明当前 Python 环境没有安装 `Nuitka` 及其依赖：
 
 ```bash
-python -m pip install pyinstaller
+python -m pip install Nuitka ordered-set zstandard
 ```
 
 ### 2. `playwright` 相关资源缺失
@@ -130,6 +132,8 @@ python -m pip install pyinstaller
 ```bash
 playwright install chromium
 ```
+
+`playwright` 的 Python driver 和包数据会由 Nuitka 插件自动处理，但浏览器本体仍需按目标系统单独安装。
 
 ### 3. Windows 打包后双击无反应
 
