@@ -55,6 +55,7 @@ from proxy_config import (
 )
 from web_admin_client import (
     get_remote_verification_info,
+    pull_remote_github_accounts,
     pull_remote_mail_accounts,
     push_github_result,
     push_mail_account,
@@ -276,6 +277,15 @@ def _pull_remote_accounts_for_ui(options: dict[str, Any]) -> list[dict[str, Any]
         raise RuntimeError("请先在系统设置或导入弹窗中填写客户端 API 地址")
     if not api_token:
         raise RuntimeError("请先在系统设置或导入弹窗中填写客户端 API Token")
+    remote_kind = str(merged.get("remoteAccountKind") or "mail").strip()
+    if remote_kind == "github_no_2fa":
+        return pull_remote_github_accounts(
+            base_url=base_url,
+            api_token=api_token,
+            limit=limit,
+            fetch_all=fetch_all,
+            two_fa_enabled=False,
+        )
     return pull_remote_mail_accounts(
         base_url=base_url,
         api_token=api_token,
@@ -285,8 +295,8 @@ def _pull_remote_accounts_for_ui(options: dict[str, Any]) -> list[dict[str, Any]
     )
 
 
-def _email_to_username(email: str, max_len: int = 20) -> str:
-    return email.split("@")[0].replace(".", "").replace("+", "")[:max_len]
+def _email_to_username(email: str) -> str:
+    return str(email or "").split("@", 1)[0].strip()
 
 
 def _profile_name(email: str) -> str:
@@ -472,6 +482,123 @@ def _append_failed_account_plain(*, raw_line: str, fallback_email: str = "", fal
             f.write(raw + "\n")
 
 
+def _run_enable_2fa_account(
+    account: dict[str, Any],
+    log: Callable[[str], None],
+    on_status: Callable[[str], None],
+    cancel: Callable[[], bool],
+) -> str:
+    email = str(account.get("email") or "").strip()
+    password = str(account.get("password") or account.get("github_password") or "").strip()
+    username = str(account.get("github_username") or _email_to_username(email)).split("@", 1)[0].strip()
+    profile_id = ""
+    ws = ""
+    final_ui_status = STATUS_FAILED
+    if not email or not password:
+        on_status(STATUS_FAILED)
+        log("补开 2FA 失败：缺少邮箱或 GitHub 密码")
+        return "failed"
+
+    try:
+        if cancel():
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
+            return "skipped"
+
+        on_status(STATUS_RUNNING)
+        bb_ok, bb_msg = check_bitbrowser_alive()
+        if not bb_ok:
+            raise RuntimeError(f"BitBrowser 不可用: {bb_msg}")
+
+        log(f"[{email}] 创建并打开浏览器（补开 2FA）...")
+        proxy_cfg = get_proxy_config()
+        bit_proxy = to_bitbrowser_proxy(proxy_cfg)
+        profile = create_github_ready_browser(
+            _profile_name(email),
+            platform="https://github.com",
+            proxy_settings=bit_proxy,
+        )
+        profile_id = profile.get("id", "")
+        if not profile_id:
+            raise RuntimeError("创建档案失败：未返回 id")
+        open_result = open_browser(profile_id)
+        ws = _cdp_ws(open_result)
+        if not ws:
+            raise RuntimeError("打开浏览器失败：未返回 CDP 地址")
+
+        time.sleep(2)
+        close_extra_tabs_after_open(ws, lambda m: log(f"[{email}] {m}"))
+        active_ws = _ensure_browser(profile_id, ws, log) or ws
+
+        if cancel():
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
+            return "skipped"
+
+        log(f"[{email}] 登录 GitHub，准备补开 2FA...")
+        from github_automation import run_login
+        loop_login = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop_login)
+        login_ok = loop_login.run_until_complete(
+            run_login(active_ws, email, password, log_callback=log)
+        )
+        if not login_ok:
+            raise RuntimeError("GitHub 登录失败")
+
+        if cancel():
+            final_ui_status = STATUS_SKIPPED
+            on_status(final_ui_status)
+            return "skipped"
+
+        on_status(STATUS_2FA)
+        log(f"[{email}] 登录成功，开始单独开启 2FA...")
+        from github_automation import run_enable_2fa_and_get_secret
+        loop_2fa = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop_2fa)
+        secret = loop_2fa.run_until_complete(
+            run_enable_2fa_and_get_secret(active_ws, email=email, log_callback=log)
+        )
+        if not secret:
+            raise RuntimeError("未能开启 2FA 或未提取到 TOTP secret")
+
+        _append_output(f"{email}---{password}---{secret}")
+        _try_push_github_result(
+            account=account,
+            email=email,
+            github_username=username,
+            github_password=password,
+            totp_secret=secret,
+            log=log,
+            update_existing=bool(get_app_config().get("updateExistingGithubOn2fa", True)),
+        )
+        final_ui_status = STATUS_SUCCESS
+        on_status(final_ui_status)
+        log(f"[{email}] 2FA 补开成功")
+        return "success"
+    except Exception as exc:
+        log(f"[{email}] 补开 2FA 失败: {exc}")
+        _append_failed_record(email, str(exc), mode_label="GitHub", stage="补开2FA")
+        final_ui_status = STATUS_FAILED
+        on_status(final_ui_status)
+        return "failed"
+    finally:
+        if profile_id:
+            try:
+                keep_profile = final_ui_status in _keep_window_statuses()
+                try:
+                    close_browser(profile_id)
+                    time.sleep(2)
+                except Exception:
+                    pass
+                if keep_profile:
+                    log(f"[{email}] 命中保留档案策略（状态: {final_ui_status}），已关闭窗口并保留 BitBrowser 档案")
+                else:
+                    delete_browser(profile_id)
+                    log(f"[{email}] 已清理 BitBrowser 档案（状态: {final_ui_status}）")
+            except Exception as ex:
+                log(f"[{email}] 清理 BitBrowser 档案失败: {ex}")
+
+
 # ---------------------------------------------------------------------------
 # 单个账号流程（后台线程执行，可中断）
 # ---------------------------------------------------------------------------
@@ -485,6 +612,9 @@ def _run_single_account(
     """
     返回状态: "success" / "partial" / "failed" / "skipped"
     """
+    if str(account.get("task_type") or "").strip() == "enable_2fa":
+        return _run_enable_2fa_account(account, log, on_status, cancel)
+
     email = account["email"]
     base_pw = account["password"]
     final_pw = base_pw + PASSWORD_SUFFIX
@@ -740,7 +870,8 @@ def _run_single_account(
             log(f"[{email}] 注册成功！2FA 密钥已获取并导出")
             _try_push_github_result(
                 account=account,
-                github_login=username,
+                email=email,
+                github_username=username,
                 github_password=final_pw,
                 totp_secret=secret,
                 log=log,
@@ -754,7 +885,8 @@ def _run_single_account(
             _append_output(f"{email}---{final_pw}---NO_2FA")
             _try_push_github_result(
                 account=account,
-                github_login=username,
+                email=email,
+                github_username=username,
                 github_password=final_pw,
                 totp_secret="",
                 log=log,
@@ -881,10 +1013,12 @@ def _try_push_mail_account(
 def _try_push_github_result(
     *,
     account: dict[str, Any],
-    github_login: str,
+    email: str,
+    github_username: str,
     github_password: str,
     totp_secret: str,
     log: Callable[[str], None],
+    update_existing: bool = False,
 ) -> None:
     cfg = get_app_config()
     if not cfg.get("pushGithubResult"):
@@ -901,14 +1035,17 @@ def _try_push_github_result(
         push_github_result(
             base_url=base_url,
             api_token=api_token,
-            github_login=github_login,
+            email=email,
+            github_username=github_username,
             github_password=github_password,
             totp_secret=totp_secret,
             bind_mail_account_id=account.get("mail_account_id"),
-            bind_email=account.get("email"),
             lease_token=account.get("lease_token"),
+            update_existing=update_existing,
         )
-        if totp_secret:
+        if update_existing and totp_secret:
+            log("已更新管理中心 GitHub 账号 2FA 信息")
+        elif totp_secret:
             log("已回传 GitHub 成品账号到管理中心")
         else:
             log("已回传无 2FA 的成功账号到管理中心")

@@ -2,6 +2,7 @@ from app.models.audit_log import AuditLog
 from app.models.desktop_client import DesktopClient
 from app.models.github_account import GitHubAccount
 from app.models.github_credential import GitHubCredential
+from app.models.github_health_check_config import GitHubHealthCheckConfig
 from app.models.mail_account import MailAccount
 from app.models.mail_credential import MailCredential
 from app.models.sync_batch import SyncBatch
@@ -13,6 +14,7 @@ __all__ = [
     "DesktopClient",
     "GitHubAccount",
     "GitHubCredential",
+    "GitHubHealthCheckConfig",
     "MailAccount",
     "MailCredential",
     "SyncBatch",

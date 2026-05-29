@@ -10,10 +10,7 @@ export WEB_ADMIN_DOCS_ENABLED="${WEB_ADMIN_DOCS_ENABLED:-false}"
 export WEB_ADMIN_COOKIE_SECURE="${WEB_ADMIN_COOKIE_SECURE:-false}"
 export WEB_ADMIN_FRONTEND_DIST="${WEB_ADMIN_FRONTEND_DIST:-../frontend/dist}"
 
-python create_database.py
-python init_db.py
-python migrate_mail_status_schema.py
-python create_admin.py
+python backend_cli.py prepare
 
 exec python -m uvicorn app.main:app \
   --host "${WEB_ADMIN_HOST:-0.0.0.0}" \

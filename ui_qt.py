@@ -26,19 +26,43 @@ class ProxySettingsDialog(QtWidgets.QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("系统设置")
-        self.setMinimumWidth(450)
+        self.resize(760, 460)
+        self.setMinimumSize(680, 420)
         self._test_cb = test_cb
         self._test_bb_cb = test_bb_cb
         self._init_ui(current_cfg)
 
     def _init_ui(self, cfg: dict[str, Any]) -> None:
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(15)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(10)
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.setDocumentMode(True)
+        layout.addWidget(tabs, 1)
+
+        def make_tab() -> tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout]:
+            tab = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab)
+            tab_layout.setContentsMargins(12, 12, 12, 12)
+            tab_layout.setSpacing(12)
+            return tab, tab_layout
+
+        def make_form(group: QtWidgets.QGroupBox) -> QtWidgets.QFormLayout:
+            form = QtWidgets.QFormLayout(group)
+            form.setSpacing(10)
+            form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+            return form
+
+        conn_tab, conn_layout = make_tab()
+        conn_columns = QtWidgets.QHBoxLayout()
+        conn_columns.setSpacing(12)
+        conn_layout.addLayout(conn_columns)
 
         # 代理设置分组
         proxy_group = QtWidgets.QGroupBox("代理配置")
-        proxy_layout = QtWidgets.QFormLayout(proxy_group)
-        proxy_layout.setSpacing(10)
+        proxy_layout = make_form(proxy_group)
 
         self.cb_type = QtWidgets.QComboBox()
         self.cb_type.addItems(["http", "socks5"])
@@ -66,12 +90,9 @@ class ProxySettingsDialog(QtWidgets.QDialog):
         self.btn_test_proxy.clicked.connect(self._on_test_proxy)
         proxy_layout.addRow("", self.btn_test_proxy)
 
-        layout.addWidget(proxy_group)
-
         # BitBrowser 设置分组
         bb_group = QtWidgets.QGroupBox("BitBrowser 配置")
-        bb_layout = QtWidgets.QFormLayout(bb_group)
-        bb_layout.setSpacing(10)
+        bb_layout = make_form(bb_group)
 
         self.ed_bb_url = QtWidgets.QLineEdit(cfg.get("bitbrowserUrl", "http://127.0.0.1:54345"))
         self.ed_bb_url.setPlaceholderText("例如：http://127.0.0.1:54345")
@@ -85,17 +106,28 @@ class ProxySettingsDialog(QtWidgets.QDialog):
         self.btn_test_bb.clicked.connect(self._on_test_bb)
         bb_layout.addRow("", self.btn_test_bb)
 
-        layout.addWidget(bb_group)
+        conn_columns.addWidget(proxy_group, 3)
+        conn_columns.addWidget(bb_group, 2)
+        conn_layout.addStretch(1)
+        tabs.addTab(conn_tab, "连接")
 
+        runtime_tab, runtime_tab_layout = make_tab()
         runtime_group = QtWidgets.QGroupBox("运行配置")
-        runtime_layout = QtWidgets.QFormLayout(runtime_group)
-        runtime_layout.setSpacing(10)
+        runtime_layout = make_form(runtime_group)
 
         self.sb_threads = QtWidgets.QSpinBox()
         self.sb_threads.setRange(1, 32)
         self.sb_threads.setValue(max(1, min(32, int(cfg.get("threadCount", 1) or 1))))
         self.sb_threads.setToolTip("同时运行的账号数量，建议从 1-3 开始逐步调整")
         runtime_layout.addRow("线程数：", self.sb_threads)
+
+        self.cb_mail_receive_mode = QtWidgets.QComboBox()
+        self.cb_mail_receive_mode.addItem("小水滴收件", "xiaoshuidi")
+        self.cb_mail_receive_mode.addItem("官方收件", "official")
+        receive_mode = str(cfg.get("mailReceiveMode", "xiaoshuidi") or "xiaoshuidi")
+        receive_idx = self.cb_mail_receive_mode.findData(receive_mode)
+        self.cb_mail_receive_mode.setCurrentIndex(receive_idx if receive_idx >= 0 else 0)
+        runtime_layout.addRow("本地导入取件方式：", self.cb_mail_receive_mode)
 
         keep_box = QtWidgets.QWidget()
         keep_layout = QtWidgets.QGridLayout(keep_box)
@@ -118,11 +150,13 @@ class ProxySettingsDialog(QtWidgets.QDialog):
         tip.setStyleSheet("color: #6b7280;")
         runtime_layout.addRow("", tip)
 
-        layout.addWidget(runtime_group)
+        runtime_tab_layout.addWidget(runtime_group)
+        runtime_tab_layout.addStretch(1)
+        tabs.addTab(runtime_tab, "运行")
 
+        remote_tab, remote_tab_layout = make_tab()
         remote_group = QtWidgets.QGroupBox("管理中心同步")
-        remote_layout = QtWidgets.QFormLayout(remote_group)
-        remote_layout.setSpacing(10)
+        remote_layout = make_form(remote_group)
 
         self.ed_web_admin_base_url = QtWidgets.QLineEdit(cfg.get("webAdminBaseUrl", ""))
         self.ed_web_admin_base_url.setPlaceholderText("例如：http://127.0.0.1:18700/api")
@@ -140,15 +174,22 @@ class ProxySettingsDialog(QtWidgets.QDialog):
         self.cb_push_github_without_2fa.setChecked(bool(cfg.get("pushGithubWithout2fa", True)))
         remote_layout.addRow("", self.cb_push_github_without_2fa)
 
+        self.cb_update_existing_github_on_2fa = QtWidgets.QCheckBox("补开 2FA 成功后更新远端已有 GitHub 账号")
+        self.cb_update_existing_github_on_2fa.setChecked(bool(cfg.get("updateExistingGithubOn2fa", True)))
+        remote_layout.addRow("", self.cb_update_existing_github_on_2fa)
+
         sync_tip = QtWidgets.QLabel("开启后：本地导入账号注册成功会回传 GitHub 账号库，注册失败会按导入时选择的官方/小水滴类型回传邮箱库。")
         sync_tip.setWordWrap(True)
         sync_tip.setStyleSheet("color: #6b7280;")
         remote_layout.addRow("", sync_tip)
 
-        layout.addWidget(remote_group)
+        remote_tab_layout.addWidget(remote_group)
+        remote_tab_layout.addStretch(1)
+        tabs.addTab(remote_tab, "同步")
 
         # 底部按钮
         btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.setContentsMargins(0, 4, 0, 0)
         btn_layout.addStretch()
 
         self.btn_save = QtWidgets.QPushButton("保存设置")
@@ -207,10 +248,12 @@ class ProxySettingsDialog(QtWidgets.QDialog):
             "bitbrowserUrl": self.ed_bb_url.text().strip(),
             "bitbrowserKey": self.ed_bb_key.text().strip(),
             "threadCount": self.sb_threads.value(),
+            "mailReceiveMode": str(self.cb_mail_receive_mode.currentData() or "xiaoshuidi"),
             "webAdminBaseUrl": self.ed_web_admin_base_url.text().strip(),
             "webAdminClientToken": self.ed_web_admin_client_token.text().strip(),
             "pushGithubResult": self.cb_push_github_result.isChecked(),
             "pushGithubWithout2fa": self.cb_push_github_without_2fa.isChecked(),
+            "updateExistingGithubOn2fa": self.cb_update_existing_github_on_2fa.isChecked(),
             "keepWindowStatuses": [
                 status for status, cb in self.keep_window_checks.items() if cb.isChecked()
             ],
@@ -220,7 +263,7 @@ class ProxySettingsDialog(QtWidgets.QDialog):
 class ImportAccountsDialog(QtWidgets.QDialog):
     def __init__(self, parent: Optional[QtWidgets.QWidget], current_cfg: dict[str, Any]):
         super().__init__(parent)
-        self.setWindowTitle("导入账号")
+        self.setWindowTitle("远程拉取账号")
         self.setMinimumWidth(480)
         self._init_ui(current_cfg)
 
@@ -228,22 +271,7 @@ class ImportAccountsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setSpacing(14)
 
-        source_group = QtWidgets.QGroupBox("账号来源")
-        source_layout = QtWidgets.QVBoxLayout(source_group)
-        source_layout.setSpacing(10)
-        self.rb_local = QtWidgets.QRadioButton("本地文件 / 剪贴板")
-        self.rb_remote = QtWidgets.QRadioButton("拉取管理中心远程账号")
-        source_layout.addWidget(self.rb_local)
-        source_layout.addWidget(self.rb_remote)
-
-        source = str(cfg.get("accountSource", "local") or "local")
-        if source == "remote":
-            self.rb_remote.setChecked(True)
-        else:
-            self.rb_local.setChecked(True)
-        layout.addWidget(source_group)
-
-        remote_group = QtWidgets.QGroupBox("远程拉取")
+        remote_group = QtWidgets.QGroupBox("管理端账号拉取")
         remote_layout = QtWidgets.QFormLayout(remote_group)
         remote_layout.setSpacing(10)
 
@@ -254,6 +282,14 @@ class ImportAccountsDialog(QtWidgets.QDialog):
         self.ed_remote_token = QtWidgets.QLineEdit(cfg.get("webAdminClientToken", ""))
         self.ed_remote_token.setPlaceholderText("桌面客户端 Token")
         remote_layout.addRow("客户端 Token：", self.ed_remote_token)
+
+        self.cb_remote_kind = QtWidgets.QComboBox()
+        self.cb_remote_kind.addItem("邮箱账号（注册新 GitHub）", "mail")
+        self.cb_remote_kind.addItem("GitHub 未开启 2FA 账号（补开 2FA）", "github_no_2fa")
+        remote_kind = str(cfg.get("remoteAccountKind", "mail") or "mail")
+        kind_idx = self.cb_remote_kind.findData(remote_kind)
+        self.cb_remote_kind.setCurrentIndex(kind_idx if kind_idx >= 0 else 0)
+        remote_layout.addRow("账号类型：", self.cb_remote_kind)
 
         self.cb_receive_mode = QtWidgets.QComboBox()
         self.cb_receive_mode.addItem("小水滴收件", "xiaoshuidi")
@@ -286,14 +322,14 @@ class ImportAccountsDialog(QtWidgets.QDialog):
             self.rb_remote_count.setChecked(True)
         layout.addWidget(remote_group)
 
-        tip = QtWidgets.QLabel("远程模式会从管理中心租约拉取邮箱；本地模式保持现有导入方式。当前官方收件仍依赖管理中心接口，小水滴可完全本地运行。")
+        tip = QtWidgets.QLabel("此窗口只用于从管理端远程拉取；本地文件和剪贴板导入请直接使用顶部对应按钮，避免混用。")
         tip.setWordWrap(True)
         tip.setStyleSheet("color: #6b7280;")
         layout.addWidget(tip)
 
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch(1)
-        btn_ok = QtWidgets.QPushButton("确定")
+        btn_ok = QtWidgets.QPushButton("开始拉取")
         btn_ok.setDefault(True)
         btn_ok.clicked.connect(self.accept)
         btn_cancel = QtWidgets.QPushButton("取消")
@@ -302,23 +338,21 @@ class ImportAccountsDialog(QtWidgets.QDialog):
         btns.addWidget(btn_cancel)
         layout.addLayout(btns)
 
-        self.rb_remote.toggled.connect(self._sync_state)
+        self.cb_remote_kind.currentIndexChanged.connect(self._sync_state)
         self.rb_remote_count.toggled.connect(self._sync_state)
         self._sync_state()
 
     def _sync_state(self) -> None:
-        remote_enabled = self.rb_remote.isChecked()
-        self.ed_remote_base_url.setEnabled(remote_enabled)
-        self.ed_remote_token.setEnabled(remote_enabled)
-        self.rb_remote_count.setEnabled(remote_enabled)
-        self.rb_remote_all.setEnabled(remote_enabled)
-        self.sb_remote_count.setEnabled(remote_enabled and self.rb_remote_count.isChecked())
+        remote_kind = str(self.cb_remote_kind.currentData() or "mail")
+        self.cb_receive_mode.setEnabled(remote_kind == "mail")
+        self.sb_remote_count.setEnabled(self.rb_remote_count.isChecked())
 
     def get_values(self) -> dict[str, Any]:
         return {
-            "accountSource": "remote" if self.rb_remote.isChecked() else "local",
+            "accountSource": "remote",
             "webAdminBaseUrl": self.ed_remote_base_url.text().strip(),
             "webAdminClientToken": self.ed_remote_token.text().strip(),
+            "remoteAccountKind": str(self.cb_remote_kind.currentData() or "mail"),
             "remoteFetchMode": "all" if self.rb_remote_all.isChecked() else "count",
             "remoteFetchCount": self.sb_remote_count.value(),
             "mailReceiveMode": str(self.cb_receive_mode.currentData() or "xiaoshuidi"),
@@ -745,54 +779,48 @@ class MainWindow(QtWidgets.QMainWindow):
         # 顶部工具栏：桌面工具的常规入口
         tb = QtWidgets.QToolBar("Main")
         tb.setMovable(False)
+        tb.setFloatable(False)
         tb.setIconSize(QtCore.QSize(18, 18))
+        tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.addToolBar(tb)
 
-        act_import = QtGui.QAction("导入文件", self)
-        act_import.triggered.connect(self.import_file)
-        tb.addAction(act_import)
+        def add_section(title: str) -> None:
+            if tb.actions():
+                tb.addSeparator()
+            label = QtWidgets.QLabel(title)
+            label.setStyleSheet("color: #6b7280; font-size: 12px; margin: 0 2px 0 6px;")
+            tb.addWidget(label)
 
-        act_paste = QtGui.QAction("粘贴导入", self)
-        act_paste.triggered.connect(self.paste_import)
-        tb.addAction(act_paste)
+        def add_action(text: str, slot, tip: str) -> QtGui.QAction:
+            action = QtGui.QAction(text, self)
+            action.setToolTip(tip)
+            action.setStatusTip(tip)
+            action.triggered.connect(slot)
+            tb.addAction(action)
+            return action
 
-        tb.addSeparator()
+        add_section("导入")
+        add_action("文件导入", self.import_file, "从本地文本文件导入邮箱账号")
+        add_action("粘贴导入", self.paste_import, "直接读取剪贴板文本导入邮箱账号")
+        add_action("远程拉取", self.pull_remote, "从管理端拉取邮箱账号或 GitHub 未开启 2FA 账号")
 
-        self.act_run_selected = QtGui.QAction("注册选中", self)
-        self.act_run_selected.triggered.connect(self.run_selected)
-        tb.addAction(self.act_run_selected)
+        add_section("任务")
+        self.act_run_selected = add_action("运行选中", self.run_selected, "运行表格中选中的账号")
+        self.act_run_all = add_action("运行全部", self.run_all, "运行所有等待或失败状态的账号")
 
-        self.act_run_all = QtGui.QAction("全部轮询", self)
-        self.act_run_all.triggered.connect(self.run_all)
-        tb.addAction(self.act_run_all)
-
-        self.act_skip = QtGui.QAction("跳过当前", self)
+        self.act_skip = add_action("跳过当前", self.skip_current, "单线程运行时跳过当前账号")
         self.act_skip.setEnabled(False)
-        self.act_skip.triggered.connect(self.skip_current)
-        tb.addAction(self.act_skip)
 
-        self.act_stop = QtGui.QAction("停止", self)
+        self.act_stop = add_action("停止", self.stop, "停止派发新任务，等待已启动任务收尾")
         self.act_stop.setEnabled(False)
-        self.act_stop.triggered.connect(self.stop)
-        tb.addAction(self.act_stop)
 
-        tb.addSeparator()
-        act_open = QtGui.QAction("打开导出", self)
-        act_open.triggered.connect(self._open_output_cb)
-        tb.addAction(act_open)
+        add_section("结果")
+        add_action("导出结果", self._open_output_cb, "打开注册结果导出文件")
+        add_action("失败账号", self.open_failed_accounts_plain, "打开失败账号明文列表")
+        add_action("清理成功", self.deduplicate_accounts, "从失败账号列表中移除已注册成功的账号")
 
-        act_open_failed_plain = QtGui.QAction("打开失败账号", self)
-        act_open_failed_plain.triggered.connect(self.open_failed_accounts_plain)
-        tb.addAction(act_open_failed_plain)
-
-        act_dedup = QtGui.QAction("清理已成功", self)
-        act_dedup.triggered.connect(self.deduplicate_accounts)
-        tb.addAction(act_dedup)
-
-        tb.addSeparator()
-        act_proxy = QtGui.QAction("系统设置", self)
-        act_proxy.triggered.connect(self.show_proxy_settings)
-        tb.addAction(act_proxy)
+        add_section("配置")
+        add_action("系统设置", self.show_proxy_settings, "配置代理、BitBrowser、远程同步与本地导入取件方式")
 
         # 状态栏：桌面 UX 的“持续反馈”
         self.statusBar().showMessage("就绪")
@@ -1223,20 +1251,6 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------------- Import ----------------
     @QtCore.Slot()
     def import_file(self) -> None:
-        dlg = ImportAccountsDialog(self, self._get_app_cfg())
-        if dlg.exec() != QtWidgets.QDialog.Accepted:
-            return
-        opts = dlg.get_values()
-        self._save_proxy_cfg(opts)
-        if opts["accountSource"] == "remote":
-            try:
-                accounts = self._pull_remote_accounts(opts)
-                n = self._add_remote_accounts(accounts)
-                self.append_log(f"从管理中心拉取 {n} 个账号")
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "远程拉取失败", str(e))
-            return
-
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择账号文件", "", "文本文件 (*.txt);;所有文件 (*)")
         if not path:
             return
@@ -1250,26 +1264,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def paste_import(self) -> None:
-        dlg = ImportAccountsDialog(self, self._get_app_cfg())
-        if dlg.exec() != QtWidgets.QDialog.Accepted:
-            return
-        opts = dlg.get_values()
-        self._save_proxy_cfg(opts)
-        if opts["accountSource"] == "remote":
-            try:
-                accounts = self._pull_remote_accounts(opts)
-                n = self._add_remote_accounts(accounts)
-                self.append_log(f"从管理中心拉取 {n} 个账号")
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "远程拉取失败", str(e))
-            return
-
         text = QtWidgets.QApplication.clipboard().text() or ""
         n = self._add_accounts_from_text(text)
         if n:
             self.append_log(f"从剪贴板导入 {n} 个账号")
         else:
             QtWidgets.QMessageBox.information(self, "提示", "剪贴板中未找到有效账号格式")
+
+    @QtCore.Slot()
+    def pull_remote(self) -> None:
+        dlg = ImportAccountsDialog(self, self._get_app_cfg())
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        opts = dlg.get_values()
+        self._save_proxy_cfg(opts)
+        try:
+            accounts = self._pull_remote_accounts(opts)
+            n = self._add_remote_accounts(accounts)
+            kind_label = "GitHub 未开启 2FA 账号" if opts.get("remoteAccountKind") == "github_no_2fa" else "邮箱账号"
+            self.append_log(f"从管理中心拉取 {n} 个{kind_label}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "远程拉取失败", str(e))
 
     def _add_accounts_from_text(self, text: str) -> int:
         receive_mode = str(self._get_app_cfg().get("mailReceiveMode", "xiaoshuidi") or "xiaoshuidi")
@@ -1318,7 +1333,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def run_selected(self) -> None:
         indices = self._selected_indices()
         if not indices:
-            QtWidgets.QMessageBox.information(self, "提示", "请先选择要注册的账号（支持多选）")
+            QtWidgets.QMessageBox.information(self, "提示", "请先选择要运行的账号（支持多选）")
             return
         self._start_work(indices)
 
@@ -1326,7 +1341,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def run_all(self) -> None:
         pending = [i for i, a in enumerate(self.accounts) if a.get("status") in ("等待", "失败", "服务拒绝", "用户名占用")]
         if not pending:
-            QtWidgets.QMessageBox.information(self, "提示", "没有等待注册或失败的账号")
+            QtWidgets.QMessageBox.information(self, "提示", "没有等待运行或失败的账号")
             return
         self._start_work(pending)
 

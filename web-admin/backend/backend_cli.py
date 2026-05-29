@@ -8,7 +8,10 @@ import uvicorn
 from create_admin import main as create_admin_main
 from create_database import main as create_database_main
 from init_db import main as init_db_main
+from migrate_github_account_email_schema import main as migrate_github_account_email_schema_main
+from migrate_github_health_schema import main as migrate_github_health_schema_main
 from migrate_mail_status_schema import main as migrate_mail_status_schema_main
+from migrate_sync_log_action_schema import main as migrate_sync_log_action_schema_main
 
 
 def prepare_env() -> dict[str, str]:
@@ -25,6 +28,9 @@ def prepare_runtime() -> None:
     create_database_main()
     init_db_main()
     migrate_mail_status_schema_main()
+    migrate_github_account_email_schema_main()
+    migrate_github_health_schema_main()
+    migrate_sync_log_action_schema_main()
     create_admin_main()
 
 

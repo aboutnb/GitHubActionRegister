@@ -14,6 +14,7 @@ from app.models.mail_credential import MailCredential
 from app.schemas.client import (
     HeartbeatRequest,
     HeartbeatResponse,
+    PullGitHubResponse,
     PullMailResponse,
     PushGitHubRequest,
     PushGitHubResponse,
@@ -22,7 +23,7 @@ from app.schemas.client import (
 )
 from app.schemas.mail import SingleMailInfoResponse
 from app.services.mail_fetch import fetch_latest_mail_info
-from app.services.sync import pull_mail_accounts, push_github_accounts, push_mail_accounts
+from app.services.sync import pull_github_accounts, pull_mail_accounts, push_github_accounts, push_mail_accounts
 
 router = APIRouter(prefix="/client", tags=["client"])
 
@@ -43,6 +44,22 @@ def pull_mail(
     return PullMailResponse(items=items)
 
 
+@router.get("/github-accounts/pull", response_model=PullGitHubResponse)
+def pull_github(
+    request: Request,
+    limit: int = Query(10, ge=1, le=100),
+    two_fa_enabled: bool | None = Query(default=None),
+    client: DesktopClient = Depends(get_current_client),
+    db: Session = Depends(get_db),
+) -> PullGitHubResponse:
+    client.last_seen_at = datetime.now(timezone.utc)
+    if request.client:
+        client.last_ip = request.client.host
+    items = pull_github_accounts(db, client, limit=limit, two_fa_enabled=two_fa_enabled)
+    db.commit()
+    return PullGitHubResponse(items=items)
+
+
 @router.post("/github-accounts/push", response_model=PushGitHubResponse)
 def push_github(
     payload: PushGitHubRequest,
@@ -53,7 +70,7 @@ def push_github(
     client.last_seen_at = datetime.now(timezone.utc)
     if request.client:
         client.last_ip = request.client.host
-    batch_no, success_count, duplicate_count = push_github_accounts(
+    batch_no, success_count, duplicate_count, updated_count = push_github_accounts(
         db,
         client=client,
         batch_name=payload.batch_name,
@@ -64,6 +81,7 @@ def push_github(
         batch_no=batch_no,
         success_count=success_count,
         duplicate_count=duplicate_count,
+        updated_count=updated_count,
     )
 
 

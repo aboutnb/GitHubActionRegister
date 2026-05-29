@@ -22,6 +22,9 @@ export const deleteGitHubAccount = (id) => http.delete(`/admin/github-accounts/$
 export const bulkUpdateGitHubStatus = (payload) => http.post('/admin/github-accounts/bulk-status', payload);
 export const bulkDeleteGitHubAccounts = (payload) => http.post('/admin/github-accounts/bulk-delete', payload);
 export const bulkExportGitHubAccounts = (payload) => http.post('/admin/github-accounts/bulk-export', payload);
+export const fetchGitHubHealthCheckConfig = () => http.get('/admin/github-accounts/health-check/config');
+export const updateGitHubHealthCheckConfig = (payload) => http.put('/admin/github-accounts/health-check/config', payload);
+export const runGitHubHealthCheck = (payload) => http.post('/admin/github-accounts/health-check/run', payload);
 export const fetchDesktopClients = () => http.get('/admin/desktop-clients');
 export const createDesktopClient = (payload) => http.post('/admin/desktop-clients', payload);
 export const deleteDesktopClient = (id) => http.delete(`/admin/desktop-clients/${id}`);

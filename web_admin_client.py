@@ -100,6 +100,49 @@ def pull_remote_mail_accounts(
     return items
 
 
+def pull_remote_github_accounts(
+    *,
+    base_url: str,
+    api_token: str,
+    limit: int = 10,
+    fetch_all: bool = False,
+    two_fa_enabled: bool | None = None,
+) -> list[dict[str, Any]]:
+    base = _normalize_base_url(base_url)
+    headers = _build_client_headers(api_token)
+    batch_limit = REMOTE_BATCH_LIMIT if fetch_all else max(1, min(int(limit or 10), REMOTE_BATCH_LIMIT))
+
+    items: list[dict[str, Any]] = []
+    while True:
+        params: dict[str, Any] = {"limit": batch_limit}
+        if two_fa_enabled is not None:
+            params["two_fa_enabled"] = str(bool(two_fa_enabled)).lower()
+        resp = requests.get(
+            f"{base}/client/github-accounts/pull",
+            headers=headers,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        data = _parse_json_response(resp)
+        batch = data.get("items") or []
+        if not isinstance(batch, list):
+            raise RuntimeError("客户端 API 返回的 GitHub 账号列表格式不正确")
+
+        for item in batch:
+            if not isinstance(item, dict):
+                continue
+            account = dict(item)
+            account["source"] = "remote_github"
+            account["task_type"] = "enable_2fa"
+            account["password"] = str(account.get("github_password") or "").strip()
+            account["status"] = "等待"
+            items.append(account)
+
+        if not fetch_all or len(batch) < batch_limit:
+            break
+    return items
+
+
 def get_remote_mail_info(
     *,
     base_url: str,
@@ -177,12 +220,13 @@ def push_github_result(
     *,
     base_url: str,
     api_token: str,
-    github_login: str,
+    email: str,
+    github_username: str | None = None,
     github_password: str,
     totp_secret: str,
     bind_mail_account_id: int | None = None,
-    bind_email: str | None = None,
     lease_token: str | None = None,
+    update_existing: bool = False,
 ) -> dict[str, Any]:
     base = _normalize_base_url(base_url)
     headers = _build_client_headers(api_token)
@@ -191,14 +235,14 @@ def push_github_result(
         "batch_name": batch_name,
         "items": [
             {
-                "github_login": github_login,
-                "github_username": github_login,
+                "email": email,
+                "github_username": github_username or email.split("@", 1)[0],
                 "github_password": github_password,
                 "totp_secret": totp_secret or "",
                 "recovery_codes": [],
                 "bind_mail_account_id": bind_mail_account_id,
-                "bind_email": bind_email,
                 "lease_token": lease_token,
+                "update_existing": update_existing,
             }
         ],
     }

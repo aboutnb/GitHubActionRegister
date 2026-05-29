@@ -55,9 +55,9 @@ CREATE TABLE IF NOT EXISTS asset_center.mail_credentials (
 CREATE TABLE IF NOT EXISTS asset_center.sync_batches (
   id BIGSERIAL PRIMARY KEY,
   batch_no VARCHAR(64) NOT NULL UNIQUE,
-  batch_type VARCHAR(32) NOT NULL CHECK (batch_type IN ('mail_import', 'github_push', 'github_export')),
+  batch_type VARCHAR(32) NOT NULL CHECK (batch_type IN ('mail_import', 'mail_push', 'github_push', 'github_export', 'github_health_check')),
   client_id BIGINT REFERENCES asset_center.desktop_clients(id),
-  source VARCHAR(32) NOT NULL CHECK (source IN ('web', 'desktop')),
+  source VARCHAR(32) NOT NULL CHECK (source IN ('web', 'desktop', 'scheduler')),
   total_count INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0,
   duplicate_count INTEGER NOT NULL DEFAULT 0,
@@ -68,16 +68,34 @@ CREATE TABLE IF NOT EXISTS asset_center.sync_batches (
 
 CREATE TABLE IF NOT EXISTS asset_center.github_accounts (
   id BIGSERIAL PRIMARY KEY,
-  github_login VARCHAR(255) NOT NULL UNIQUE,
+  email VARCHAR(255) NOT NULL UNIQUE,
   github_username VARCHAR(255),
   bind_mail_account_id BIGINT REFERENCES asset_center.mail_accounts(id),
-  bind_email VARCHAR(255),
   source_client_id BIGINT REFERENCES asset_center.desktop_clients(id),
   source_batch_id BIGINT REFERENCES asset_center.sync_batches(id),
   status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'sold', 'locked', 'unknown')),
   two_fa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
   remark TEXT,
   last_exported_at TIMESTAMPTZ,
+  health_status VARCHAR(32) NOT NULL DEFAULT 'unknown' CHECK (health_status IN ('unknown', 'alive', 'not_found', 'error')),
+  health_checked_at TIMESTAMPTZ,
+  health_http_status INTEGER,
+  health_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS asset_center.github_health_check_configs (
+  id BIGSERIAL PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  cron_expression VARCHAR(64) NOT NULL DEFAULT '0 0 1,15 * *',
+  proxy_pool TEXT,
+  accounts_per_proxy INTEGER NOT NULL DEFAULT 15,
+  timeout_seconds INTEGER NOT NULL DEFAULT 10,
+  last_run_at TIMESTAMPTZ,
+  next_run_at TIMESTAMPTZ,
+  last_batch_no VARCHAR(64),
+  updated_by BIGINT REFERENCES asset_center.web_users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -94,7 +112,7 @@ CREATE TABLE IF NOT EXISTS asset_center.github_credentials (
 CREATE TABLE IF NOT EXISTS asset_center.sync_logs (
   id BIGSERIAL PRIMARY KEY,
   client_id BIGINT REFERENCES asset_center.desktop_clients(id),
-  action VARCHAR(32) NOT NULL CHECK (action IN ('pull_mail', 'push_github', 'heartbeat')),
+  action VARCHAR(32) NOT NULL CHECK (action IN ('pull_mail', 'pull_github', 'push_github', 'push_mail', 'heartbeat')),
   request_id VARCHAR(64),
   payload_count INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0,
@@ -119,6 +137,8 @@ CREATE TABLE IF NOT EXISTS asset_center.audit_logs (
 CREATE INDEX IF NOT EXISTS idx_mail_accounts_status ON asset_center.mail_accounts(status);
 CREATE INDEX IF NOT EXISTS idx_mail_accounts_lease_expires_at ON asset_center.mail_accounts(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_github_accounts_status ON asset_center.github_accounts(status);
+CREATE INDEX IF NOT EXISTS idx_github_accounts_health_status ON asset_center.github_accounts(health_status);
+CREATE INDEX IF NOT EXISTS idx_github_accounts_health_checked_at ON asset_center.github_accounts(health_checked_at);
 CREATE INDEX IF NOT EXISTS idx_github_accounts_bind_mail ON asset_center.github_accounts(bind_mail_account_id);
 CREATE INDEX IF NOT EXISTS idx_sync_logs_client_created ON asset_center.sync_logs(client_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON asset_center.audit_logs(target_type, target_id, created_at DESC);

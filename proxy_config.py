@@ -33,6 +33,7 @@ DEFAULT_ACCOUNT_SOURCE = "local"
 DEFAULT_REMOTE_FETCH_MODE = "count"
 DEFAULT_REMOTE_FETCH_COUNT = 10
 DEFAULT_MAIL_RECEIVE_MODE = "xiaoshuidi"
+DEFAULT_REMOTE_ACCOUNT_KIND = "mail"
 
 
 def _clean_str(value: Any, default: str = "") -> str:
@@ -116,6 +117,10 @@ def save_config(config: dict[str, Any]) -> None:
             "webAdminBaseUrl": _clean_str(config.get("webAdminBaseUrl", current.get("webAdminBaseUrl", ""))),
             "webAdminClientToken": _clean_str(config.get("webAdminClientToken", current.get("webAdminClientToken", ""))),
             "accountSource": _clean_str(config.get("accountSource", current.get("accountSource", DEFAULT_ACCOUNT_SOURCE)), DEFAULT_ACCOUNT_SOURCE),
+            "remoteAccountKind": _clean_str(
+                config.get("remoteAccountKind", current.get("remoteAccountKind", DEFAULT_REMOTE_ACCOUNT_KIND)),
+                DEFAULT_REMOTE_ACCOUNT_KIND,
+            ),
             "remoteFetchMode": _clean_str(config.get("remoteFetchMode", current.get("remoteFetchMode", DEFAULT_REMOTE_FETCH_MODE)), DEFAULT_REMOTE_FETCH_MODE),
             "remoteFetchCount": max(1, min(9999, remote_fetch_count)),
             "mailReceiveMode": _clean_str(
@@ -124,6 +129,9 @@ def save_config(config: dict[str, Any]) -> None:
             ),
             "pushGithubResult": bool(config.get("pushGithubResult", current.get("pushGithubResult", False))),
             "pushGithubWithout2fa": bool(config.get("pushGithubWithout2fa", current.get("pushGithubWithout2fa", True))),
+            "updateExistingGithubOn2fa": bool(
+                config.get("updateExistingGithubOn2fa", current.get("updateExistingGithubOn2fa", True))
+            ),
             "keepWindowStatuses": _normalize_keep_window_statuses(
                 config.get("keepWindowStatuses", current.get("keepWindowStatuses", DEFAULT_KEEP_WINDOW_STATUSES))
             ),
@@ -152,6 +160,7 @@ def get_app_config() -> dict[str, Any]:
         "webAdminBaseUrl": _clean_str(file_cfg.get("webAdminBaseUrl") or os.environ.get("WEB_ADMIN_BASE_URL", "")),
         "webAdminClientToken": _clean_str(file_cfg.get("webAdminClientToken") or os.environ.get("WEB_ADMIN_CLIENT_TOKEN", "")),
         "accountSource": _clean_str(file_cfg.get("accountSource", DEFAULT_ACCOUNT_SOURCE), DEFAULT_ACCOUNT_SOURCE),
+        "remoteAccountKind": _clean_str(file_cfg.get("remoteAccountKind", DEFAULT_REMOTE_ACCOUNT_KIND), DEFAULT_REMOTE_ACCOUNT_KIND),
         "remoteFetchMode": _clean_str(file_cfg.get("remoteFetchMode", DEFAULT_REMOTE_FETCH_MODE), DEFAULT_REMOTE_FETCH_MODE),
         "remoteFetchCount": _normalize_positive_int(
             file_cfg.get("remoteFetchCount", DEFAULT_REMOTE_FETCH_COUNT),
@@ -163,6 +172,7 @@ def get_app_config() -> dict[str, Any]:
         ),
         "pushGithubResult": bool(file_cfg.get("pushGithubResult", False)),
         "pushGithubWithout2fa": bool(file_cfg.get("pushGithubWithout2fa", True)),
+        "updateExistingGithubOn2fa": bool(file_cfg.get("updateExistingGithubOn2fa", True)),
         "keepWindowStatuses": _normalize_keep_window_statuses(
             file_cfg.get("keepWindowStatuses", DEFAULT_KEEP_WINDOW_STATUSES)
         ),

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import get_settings
 from app.core.security import decrypt_text, encrypt_text
@@ -14,7 +14,7 @@ from app.models.mail_account import MailAccount
 from app.models.mail_credential import MailCredential
 from app.models.sync_batch import SyncBatch
 from app.models.sync_log import SyncLog
-from app.schemas.client import PullMailItem, PushGitHubItem, PushMailItem
+from app.schemas.client import PullGitHubItem, PullMailItem, PushGitHubItem, PushMailItem
 from app.services.account_linking import (
     find_mail_account_by_email,
     reconcile_mail_account_status,
@@ -22,6 +22,22 @@ from app.services.account_linking import (
     sync_mail_status_from_github_refs,
 )
 from app.services.audit import write_audit_log
+
+
+def _derive_github_username(email: str | None, github_username: str | None = None) -> str:
+    username = str(github_username or "").strip()
+    if username:
+        return username.split("@", 1)[0].strip()
+    email_value = str(email or "").strip()
+    if not email_value:
+        return ""
+    return email_value.split("@", 1)[0].strip()
+
+
+def _push_item_email(item: PushGitHubItem) -> str:
+    extra = getattr(item, "__pydantic_extra__", None)
+    legacy_login = extra.get("github_login") if isinstance(extra, dict) else None
+    return str(item.email or legacy_login or "").strip()
 
 
 def pull_mail_accounts(
@@ -87,12 +103,62 @@ def pull_mail_accounts(
     return items
 
 
+def pull_github_accounts(
+    db: Session,
+    client: DesktopClient,
+    limit: int,
+    two_fa_enabled: bool | None = None,
+) -> list[PullGitHubItem]:
+    query = (
+        db.query(GitHubAccount)
+        .join(GitHubAccount.credential)
+        .filter(GitHubAccount.status == "active")
+        .order_by(GitHubAccount.id.asc())
+    )
+    if two_fa_enabled is not None:
+        query = query.filter(GitHubAccount.two_fa_enabled == two_fa_enabled)
+
+    accounts = query.limit(max(1, min(int(limit or 10), 100))).all()
+    items: list[PullGitHubItem] = []
+    for account in accounts:
+        credential = account.credential
+        if not credential:
+            continue
+        items.append(
+            PullGitHubItem(
+                github_account_id=account.id,
+                email=account.email,
+                github_username=_derive_github_username(account.email, account.github_username),
+                github_password=decrypt_text(credential.github_password_enc),
+                totp_secret=decrypt_text(credential.totp_secret_enc) if credential.totp_secret_enc else None,
+                two_fa_enabled=account.two_fa_enabled,
+            )
+        )
+
+    db.add(
+        SyncLog(
+            client_id=client.id,
+            action="pull_github",
+            request_id=uuid4().hex,
+            payload_count=len(items),
+            success_count=len(items),
+            failed_count=0,
+            message=(
+                f"Pulled {len(items)} github accounts"
+                + (" [no_2fa]" if two_fa_enabled is False else "")
+            ),
+        )
+    )
+    db.flush()
+    return items
+
+
 def push_github_accounts(
     db: Session,
     client: DesktopClient,
     batch_name: str,
     items: list[PushGitHubItem],
-) -> tuple[str, int, int]:
+) -> tuple[str, int, int, int]:
     request_id = uuid4().hex
     batch = SyncBatch(
         batch_no=f"GH{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
@@ -108,14 +174,55 @@ def push_github_accounts(
 
     success_count = 0
     duplicate_count = 0
+    updated_count = 0
     for item in items:
+        email = _push_item_email(item)
+        if not email:
+            continue
         exists = (
             db.query(GitHubAccount)
-            .filter(GitHubAccount.github_login == item.github_login)
+            .options(joinedload(GitHubAccount.credential))
+            .filter(GitHubAccount.email == email)
             .first()
         )
         if exists:
-            duplicate_count += 1
+            if not item.update_existing:
+                duplicate_count += 1
+                continue
+            exists.github_username = _derive_github_username(email, item.github_username)
+            exists.status = "active"
+            exists.two_fa_enabled = bool(item.totp_secret)
+            credential = exists.credential
+            if credential:
+                if item.github_password:
+                    credential.github_password_enc = encrypt_text(item.github_password)
+                credential.totp_secret_enc = encrypt_text(item.totp_secret)
+                credential.recovery_codes_enc = (
+                    encrypt_text("\n".join(item.recovery_codes)) if item.recovery_codes else None
+                )
+            else:
+                db.add(
+                    GitHubCredential(
+                        github_account_id=exists.id,
+                        github_password_enc=encrypt_text(item.github_password),
+                        totp_secret_enc=encrypt_text(item.totp_secret),
+                        recovery_codes_enc=(
+                            encrypt_text("\n".join(item.recovery_codes)) if item.recovery_codes else None
+                        ),
+                    )
+                )
+            write_audit_log(
+                db=db,
+                operator_type="desktop_client",
+                operator_id=client.id,
+                action="update_github_account_2fa",
+                target_type="github_account",
+                target_id=exists.id,
+                details={"email": email, "batch_name": batch_name, "two_fa_enabled": exists.two_fa_enabled},
+            )
+            success_count += 1
+            updated_count += 1
+            sync_mail_status_from_github_refs(db, emails=[email])
             continue
 
         mail_account = None
@@ -125,10 +232,9 @@ def push_github_accounts(
                 continue
 
         account = GitHubAccount(
-            github_login=item.github_login,
-            github_username=item.github_username,
+            email=email,
+            github_username=_derive_github_username(email, item.github_username),
             bind_mail_account_id=item.bind_mail_account_id,
-            bind_email=item.bind_email,
             source_client_id=client.id,
             source_batch_id=batch.id,
             status="active",
@@ -158,14 +264,14 @@ def push_github_accounts(
             action="push_github_account",
             target_type="github_account",
             target_id=account.id,
-            details={"github_login": item.github_login, "batch_name": batch_name},
+            details={"email": email, "batch_name": batch_name},
         )
         success_count += 1
 
         sync_mail_status_from_github_refs(
             db,
             mail_account_ids=([item.bind_mail_account_id] if item.bind_mail_account_id else []),
-            emails=[item.bind_email, item.github_login],
+            emails=[email],
         )
 
     batch.success_count = success_count
@@ -181,7 +287,7 @@ def push_github_accounts(
             message=f"Pushed {success_count} github accounts from {batch_name}",
         )
     )
-    return batch.batch_no, success_count, duplicate_count
+    return batch.batch_no, success_count, duplicate_count, updated_count
 
 
 def push_mail_accounts(

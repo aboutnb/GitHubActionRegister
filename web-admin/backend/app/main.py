@@ -16,6 +16,7 @@ from app.api.routes import (
     client_sync,
 )
 from app.core.config import get_settings
+from app.services.github_health_scheduler import start_github_health_scheduler, stop_github_health_scheduler
 
 settings = get_settings()
 frontend_dist = settings.frontend_dist_path
@@ -53,6 +54,16 @@ if settings.serve_frontend and frontend_dist.exists():
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+def _startup_github_health_scheduler() -> None:
+    start_github_health_scheduler()
+
+
+@app.on_event("shutdown")
+def _shutdown_github_health_scheduler() -> None:
+    stop_github_health_scheduler()
 
 
 @app.get("/{full_path:path}", include_in_schema=False)

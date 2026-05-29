@@ -109,6 +109,19 @@ def _unique_mail_account_exists(db: Session, email: str | None) -> MailAccount |
     return find_mail_account_by_email(db, email)
 
 
+def _count_github_refs_for_mail_account(db: Session, account: MailAccount) -> int:
+    normalized_email = _normalize_account_key(account.email)
+    return (
+        db.query(func.count(GitHubAccount.id))
+        .filter(
+            (GitHubAccount.bind_mail_account_id == account.id)
+            | (func.lower(GitHubAccount.email) == normalized_email)
+        )
+        .scalar()
+        or 0
+    )
+
+
 def normalize_mail_status(value: str | None) -> str:
     status = str(value or "idle").strip().lower() or "idle"
     if status not in MAIL_STATUS_OPTIONS:
@@ -447,12 +460,7 @@ def delete_mail_account(
     if not account:
         raise HTTPException(status_code=404, detail="邮箱不存在")
 
-    bind_count = (
-        db.query(func.count(GitHubAccount.id))
-        .filter(GitHubAccount.bind_mail_account_id == account.id)
-        .scalar()
-        or 0
-    )
+    bind_count = _count_github_refs_for_mail_account(db, account)
     if bind_count > 0:
         raise HTTPException(status_code=400, detail="该邮箱已绑定 GitHub 账号，不能删除")
 
@@ -582,12 +590,7 @@ def bulk_delete_mail_accounts(
     accounts = db.query(MailAccount).filter(MailAccount.id.in_(payload.ids)).all()
     deletable_ids = []
     for account in accounts:
-        bind_count = (
-            db.query(func.count(GitHubAccount.id))
-            .filter(GitHubAccount.bind_mail_account_id == account.id)
-            .scalar()
-            or 0
-        )
+        bind_count = _count_github_refs_for_mail_account(db, account)
         if bind_count == 0:
             deletable_ids.append(account.id)
     deleted = 0

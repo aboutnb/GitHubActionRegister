@@ -48,9 +48,7 @@ def prepare_runtime(env: dict[str, str]) -> None:
     os.chdir(ROOT)
     py = backend_python()
     ensure_frontend_built()
-    run([py, "create_database.py"], cwd=BACKEND, env=env)
-    run([py, "init_db.py"], cwd=BACKEND, env=env)
-    run([py, "create_admin.py"], cwd=BACKEND, env=env)
+    run([py, "backend_cli.py", "prepare"], cwd=BACKEND, env=env)
 
 
 def serve_runtime(env: dict[str, str]) -> None:

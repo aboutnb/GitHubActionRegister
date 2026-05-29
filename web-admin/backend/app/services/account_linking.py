@@ -29,20 +29,17 @@ def sync_github_account_binding(db: Session, github_account: GitHubAccount) -> N
         bound_account = db.query(MailAccount).filter(MailAccount.id == github_account.bind_mail_account_id).first()
         if bound_account:
             normalized_bound_email = normalize_account_key(bound_account.email)
-            if not github_account.bind_email:
-                github_account.bind_email = bound_account.email
-            elif normalize_account_key(github_account.bind_email) != normalized_bound_email:
+            if not github_account.email:
+                github_account.email = bound_account.email
+            elif normalize_account_key(github_account.email) != normalized_bound_email:
                 github_account.bind_mail_account_id = None
 
     if github_account.bind_mail_account_id:
         return
 
-    candidate_email = github_account.bind_email or github_account.github_login
-    mail_account = find_mail_account_by_email(db, candidate_email)
+    mail_account = find_mail_account_by_email(db, github_account.email)
     if mail_account:
         github_account.bind_mail_account_id = mail_account.id
-        if not github_account.bind_email:
-            github_account.bind_email = mail_account.email
 
 
 def reconcile_mail_account_status(db: Session, mail_account: MailAccount) -> str:
@@ -56,8 +53,7 @@ def reconcile_mail_account_status(db: Session, mail_account: MailAccount) -> str
         .filter(
             or_(
                 GitHubAccount.bind_mail_account_id == mail_account.id,
-                func.lower(GitHubAccount.bind_email) == normalized_email,
-                func.lower(GitHubAccount.github_login) == normalized_email,
+                func.lower(GitHubAccount.email) == normalized_email,
             )
         )
         .first()

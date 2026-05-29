@@ -20,6 +20,10 @@ from app.schemas.github_account import (
     GitHubAccountCreateRequest,
     GitHubAccountCredentialResponse,
     GitHubAccountExportItem,
+    GitHubHealthCheckConfigRequest,
+    GitHubHealthCheckConfigResponse,
+    GitHubHealthCheckRunRequest,
+    GitHubHealthCheckRunResponse,
     GitHubAccountImportRequest,
     GitHubAccountImportResponse,
     GitHubAccountExportResponse,
@@ -29,6 +33,19 @@ from app.schemas.github_account import (
 from app.schemas.bulk import BulkDeleteRequest, BulkStatusUpdateRequest
 from app.services.audit import write_audit_log
 from app.services.account_linking import sync_github_account_binding, sync_mail_status_from_github_refs
+from app.services.github_health_check import (
+    DEFAULT_ACCOUNTS_PER_PROXY,
+    DEFAULT_CRON_EXPRESSION,
+    DEFAULT_TIMEOUT_SECONDS,
+    CronExpressionError,
+    get_health_check_config,
+    get_next_cron_run,
+    normalize_proxy_pool,
+    parse_proxy_pool_text,
+    perform_github_health_check,
+    serialize_proxy_pool,
+    validate_cron_interval,
+)
 from app.utils.datetime import format_datetime
 
 router = APIRouter(prefix="/admin/github-accounts", tags=["admin-github-accounts"])
@@ -43,11 +60,9 @@ def _to_export_item(account: GitHubAccount) -> GitHubAccountExportItem | None:
         return None
     secret = decrypt_text(account.credential.totp_secret_enc)
     return GitHubAccountExportItem(
-        github_login=account.github_login,
-        github_username=account.github_username,
+        email=account.email,
         github_password=decrypt_text(account.credential.github_password_enc),
         totp_secret=secret or "NO_2FA",
-        bind_email=account.bind_email,
     )
 
 
@@ -68,6 +83,24 @@ def _normalize_account_key(value: str | None) -> str:
     return str(value or "").strip().casefold()
 
 
+def _derive_github_username(email: str | None, github_username: str | None = None) -> str:
+    username = str(github_username or "").strip()
+    if username:
+        return username.split("@", 1)[0].strip()
+    email_value = str(email or "").strip()
+    if not email_value:
+        return ""
+    return email_value.split("@", 1)[0].strip()
+
+
+def _payload_email(payload) -> str:
+    legacy_login = None
+    extra = getattr(payload, "__pydantic_extra__", None)
+    if isinstance(extra, dict):
+        legacy_login = extra.get("github_login")
+    return str(getattr(payload, "email", None) or legacy_login or "").strip()
+
+
 def _sync_related_mail_accounts(
     db: Session,
     *,
@@ -77,15 +110,15 @@ def _sync_related_mail_accounts(
     sync_mail_status_from_github_refs(
         db,
         mail_account_ids=([account.bind_mail_account_id] if account.bind_mail_account_id else []),
-        emails=[account.bind_email, account.github_login, *previous_emails],
+        emails=[account.email, *previous_emails],
     )
 
 
-def _find_github_account_by_login(db: Session, github_login: str | None, exclude_id: int | None = None) -> GitHubAccount | None:
-    normalized_login = _normalize_account_key(github_login)
-    if not normalized_login:
+def _find_github_account_by_email(db: Session, email: str | None, exclude_id: int | None = None) -> GitHubAccount | None:
+    normalized_email = _normalize_account_key(email)
+    if not normalized_email:
         return None
-    query = db.query(GitHubAccount).filter(func.lower(GitHubAccount.github_login) == normalized_login)
+    query = db.query(GitHubAccount).filter(func.lower(GitHubAccount.email) == normalized_email)
     if exclude_id is not None:
         query = query.filter(GitHubAccount.id != exclude_id)
     return query.first()
@@ -131,10 +164,55 @@ def _record_export_batch(
     return batch.batch_no
 
 
+def _to_list_item(
+    account: GitHubAccount,
+    *,
+    source_client_name: str | None = None,
+) -> GitHubAccountListItem:
+    credential = account.credential
+    return GitHubAccountListItem(
+        id=account.id,
+        email=account.email,
+        github_username=account.github_username,
+        two_fa_enabled=account.two_fa_enabled,
+        status=account.status,
+        github_password=decrypt_text(credential.github_password_enc) if credential else None,
+        totp_secret=decrypt_text(credential.totp_secret_enc) if credential else None,
+        source_client_name=source_client_name,
+        created_at=format_datetime(account.created_at),
+        updated_at=format_datetime(account.updated_at),
+        last_exported_at=format_datetime(account.last_exported_at),
+        health_status=account.health_status,
+        health_checked_at=format_datetime(account.health_checked_at),
+        health_http_status=account.health_http_status,
+        health_error=account.health_error,
+        recovery_codes=_split_recovery_codes(
+            credential.recovery_codes_enc and decrypt_text(credential.recovery_codes_enc)
+        )
+        if credential
+        else [],
+        remark=account.remark,
+    )
+
+
+def _to_health_config_response(config) -> GitHubHealthCheckConfigResponse:
+    return GitHubHealthCheckConfigResponse(
+        enabled=config.enabled,
+        cron_expression=config.cron_expression,
+        proxy_urls=parse_proxy_pool_text(config.proxy_pool),
+        accounts_per_proxy=config.accounts_per_proxy,
+        timeout_seconds=config.timeout_seconds,
+        last_run_at=format_datetime(config.last_run_at),
+        next_run_at=format_datetime(config.next_run_at),
+        last_batch_no=config.last_batch_no,
+    )
+
+
 @router.get("")
 def list_github_accounts(
     q: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    health_status: str | None = Query(default=None),
     two_fa_enabled: bool | None = Query(default=None),
     age_bucket: str | None = Query(default=None),
     sort_by: str | None = Query(default=None),
@@ -151,13 +229,14 @@ def list_github_accounts(
     if q:
         like = f"%{q.strip()}%"
         query = query.filter(
-            GitHubAccount.github_login.ilike(like)
+            GitHubAccount.email.ilike(like)
             | GitHubAccount.github_username.ilike(like)
-            | GitHubAccount.bind_email.ilike(like)
             | GitHubAccount.remark.ilike(like)
         )
     if status:
         query = query.filter(GitHubAccount.status == status)
+    if health_status:
+        query = query.filter(GitHubAccount.health_status == health_status)
     if two_fa_enabled is not None:
         query = query.filter(GitHubAccount.two_fa_enabled == two_fa_enabled)
     if age_bucket:
@@ -174,11 +253,12 @@ def list_github_accounts(
 
     total = query.count()
     sort_map = {
-        "github_login": GitHubAccount.github_login,
+        "email": GitHubAccount.email,
         "github_username": GitHubAccount.github_username,
-        "bind_email": GitHubAccount.bind_email,
         "two_fa_enabled": GitHubAccount.two_fa_enabled,
         "status": GitHubAccount.status,
+        "health_status": GitHubAccount.health_status,
+        "health_checked_at": GitHubAccount.health_checked_at,
         "source_client_name": GitHubAccount.source_client_id,
         "created_at": GitHubAccount.created_at,
         "updated_at": GitHubAccount.updated_at,
@@ -196,28 +276,7 @@ def list_github_accounts(
         client.id: client.name for client in db.query(DesktopClient).all()
     }
     items = [
-        GitHubAccountListItem(
-            id=account.id,
-            github_login=account.github_login,
-            github_username=account.github_username,
-            bind_email=account.bind_email,
-            two_fa_enabled=account.two_fa_enabled,
-            status=account.status,
-            github_password=decrypt_text(account.credential.github_password_enc)
-            if account.credential
-            else None,
-            totp_secret=decrypt_text(account.credential.totp_secret_enc) if account.credential else None,
-            source_client_name=client_map.get(account.source_client_id),
-            created_at=format_datetime(account.created_at),
-            updated_at=format_datetime(account.updated_at),
-            last_exported_at=format_datetime(account.last_exported_at),
-            recovery_codes=_split_recovery_codes(
-                account.credential.recovery_codes_enc and decrypt_text(account.credential.recovery_codes_enc)
-            )
-            if account.credential
-            else [],
-            remark=account.remark,
-        ).model_dump()
+        _to_list_item(account, source_client_name=client_map.get(account.source_client_id)).model_dump()
         for account in accounts
     ]
     if items:
@@ -236,6 +295,7 @@ def list_github_accounts(
                 "sort_order": sort_order,
                 "two_fa_enabled": two_fa_enabled,
                 "age_bucket": age_bucket,
+                "health_status": health_status,
             },
         )
         db.commit()
@@ -273,6 +333,91 @@ def export_github_accounts(
     )
 
 
+@router.get("/health-check/config", response_model=GitHubHealthCheckConfigResponse)
+def get_github_health_check_config(
+    _: WebUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GitHubHealthCheckConfigResponse:
+    config = get_health_check_config(db, create=True)
+    if config and not config.next_run_at:
+        config.next_run_at = get_next_cron_run(config.cron_expression, datetime.now().astimezone())
+    db.commit()
+    db.refresh(config)
+    return _to_health_config_response(config)
+
+
+@router.put("/health-check/config", response_model=GitHubHealthCheckConfigResponse)
+def update_github_health_check_config(
+    payload: GitHubHealthCheckConfigRequest,
+    current_user: WebUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GitHubHealthCheckConfigResponse:
+    cron_expression = str(payload.cron_expression or "").strip() or DEFAULT_CRON_EXPRESSION
+    proxy_urls = normalize_proxy_pool(payload.proxy_urls)
+    try:
+        cron_expression = validate_cron_interval(cron_expression)
+        next_run_at = get_next_cron_run(cron_expression, datetime.now().astimezone())
+    except CronExpressionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    config = get_health_check_config(db, create=True)
+    config.enabled = payload.enabled
+    config.cron_expression = cron_expression
+    config.proxy_pool = serialize_proxy_pool(proxy_urls)
+    config.accounts_per_proxy = payload.accounts_per_proxy or DEFAULT_ACCOUNTS_PER_PROXY
+    config.timeout_seconds = payload.timeout_seconds or DEFAULT_TIMEOUT_SECONDS
+    config.next_run_at = next_run_at
+    config.updated_by = current_user.id
+
+    write_audit_log(
+        db,
+        operator_type="web_user",
+        operator_id=current_user.id,
+        action="update_github_health_check_config",
+        target_type="github_health_check_config",
+        target_id=config.id,
+        details={
+            "enabled": config.enabled,
+            "cron_expression": config.cron_expression,
+            "proxy_count": len(proxy_urls),
+            "accounts_per_proxy": config.accounts_per_proxy,
+            "timeout_seconds": config.timeout_seconds,
+        },
+    )
+    db.commit()
+    db.refresh(config)
+    return _to_health_config_response(config)
+
+
+@router.post("/health-check/run", response_model=GitHubHealthCheckRunResponse)
+def run_github_health_check(
+    payload: GitHubHealthCheckRunRequest,
+    current_user: WebUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> GitHubHealthCheckRunResponse:
+    proxy_urls = normalize_proxy_pool(payload.proxy_urls)
+    accounts_per_proxy = payload.accounts_per_proxy
+    timeout_seconds = payload.timeout_seconds
+    if payload.use_saved_config:
+        config = get_health_check_config(db, create=True)
+        if not proxy_urls:
+            proxy_urls = parse_proxy_pool_text(config.proxy_pool)
+        accounts_per_proxy = accounts_per_proxy or config.accounts_per_proxy
+        timeout_seconds = timeout_seconds or config.timeout_seconds
+
+    result = perform_github_health_check(
+        db,
+        account_ids=payload.account_ids,
+        proxy_urls=proxy_urls,
+        accounts_per_proxy=accounts_per_proxy,
+        timeout_seconds=timeout_seconds,
+        source="web",
+        current_user_id=current_user.id,
+    )
+    db.commit()
+    return GitHubHealthCheckRunResponse(**result)
+
+
 @router.post("/import", response_model=GitHubAccountImportResponse)
 def import_github_accounts(
     payload: GitHubAccountImportRequest,
@@ -294,23 +439,25 @@ def import_github_accounts(
     db.add(batch)
     db.flush()
 
-    seen_logins: set[str] = set()
+    seen_emails: set[str] = set()
     for item in payload.items:
-        normalized_login = _normalize_account_key(item.github_login)
-        if normalized_login in seen_logins:
+        email = _payload_email(item)
+        normalized_email = _normalize_account_key(email)
+        if not normalized_email:
+            continue
+        if normalized_email in seen_emails:
             duplicate_count += 1
             continue
-        seen_logins.add(normalized_login)
-        exists = _find_github_account_by_login(db, item.github_login)
+        seen_emails.add(normalized_email)
+        exists = _find_github_account_by_email(db, email)
         if exists:
             duplicate_count += 1
             continue
 
         secret, two_fa_enabled = _normalize_import_secret(item.totp_secret)
         account = GitHubAccount(
-            github_login=item.github_login,
-            github_username=item.github_username or item.github_login,
-            bind_email=item.bind_email,
+            email=email,
+            github_username=_derive_github_username(email, item.github_username),
             source_batch_id=batch.id,
             status="active",
             two_fa_enabled=two_fa_enabled,
@@ -361,14 +508,16 @@ def create_github_account(
     current_user: WebUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> GitHubAccountListItem:
-    exists = _find_github_account_by_login(db, payload.github_login)
+    email = _payload_email(payload)
+    if not email:
+        raise HTTPException(status_code=400, detail="请输入邮箱")
+    exists = _find_github_account_by_email(db, email)
     if exists:
-        raise HTTPException(status_code=400, detail="GitHub 登录已存在")
+        raise HTTPException(status_code=400, detail="邮箱已存在")
 
     account = GitHubAccount(
-        github_login=payload.github_login,
-        github_username=payload.github_username,
-        bind_email=payload.bind_email,
+        email=email,
+        github_username=_derive_github_username(email, payload.github_username),
         status=payload.status,
         two_fa_enabled=payload.two_fa_enabled,
         remark=payload.remark,
@@ -392,26 +541,11 @@ def create_github_account(
         action="create_github_account",
         target_type="github_account",
         target_id=account.id,
-        details={"github_login": payload.github_login},
+        details={"email": email},
     )
     db.commit()
     db.refresh(account)
-    return GitHubAccountListItem(
-        id=account.id,
-        github_login=account.github_login,
-        github_username=account.github_username,
-        bind_email=account.bind_email,
-        two_fa_enabled=account.two_fa_enabled,
-        status=account.status,
-        github_password=payload.github_password,
-        totp_secret=payload.totp_secret,
-        source_client_name=None,
-        created_at=format_datetime(account.created_at),
-        updated_at=format_datetime(account.updated_at),
-        last_exported_at=format_datetime(account.last_exported_at),
-        recovery_codes=payload.recovery_codes,
-        remark=account.remark,
-    )
+    return _to_list_item(account, source_client_name=None)
 
 
 @router.put("/{account_id}", response_model=GitHubAccountListItem)
@@ -427,14 +561,16 @@ def update_github_account(
     if not account:
         raise HTTPException(status_code=404, detail="GitHub 账号不存在")
 
-    duplicate = _find_github_account_by_login(db, payload.github_login, exclude_id=account_id)
+    email = _payload_email(payload)
+    if not email:
+        raise HTTPException(status_code=400, detail="请输入邮箱")
+    duplicate = _find_github_account_by_email(db, email, exclude_id=account_id)
     if duplicate:
-        raise HTTPException(status_code=400, detail="GitHub 登录已存在")
+        raise HTTPException(status_code=400, detail="邮箱已存在")
 
-    previous_emails = [account.bind_email, account.github_login]
-    account.github_login = payload.github_login
-    account.github_username = payload.github_username
-    account.bind_email = payload.bind_email
+    previous_emails = [account.email]
+    account.email = email
+    account.github_username = _derive_github_username(email, payload.github_username)
     account.bind_mail_account_id = None
     account.status = payload.status
     account.two_fa_enabled = payload.two_fa_enabled
@@ -471,7 +607,7 @@ def update_github_account(
         action="update_github_account",
         target_type="github_account",
         target_id=account.id,
-        details={"github_login": payload.github_login},
+        details={"email": email},
     )
     db.commit()
     db.refresh(account)
@@ -479,28 +615,7 @@ def update_github_account(
     if account.source_client_id:
         client = db.query(DesktopClient).filter(DesktopClient.id == account.source_client_id).first()
         client_name = client.name if client else None
-    return GitHubAccountListItem(
-        id=account.id,
-        github_login=account.github_login,
-        github_username=account.github_username,
-        bind_email=account.bind_email,
-        two_fa_enabled=account.two_fa_enabled,
-        status=account.status,
-        github_password=decrypt_text(account.credential.github_password_enc)
-        if account.credential
-        else None,
-        totp_secret=decrypt_text(account.credential.totp_secret_enc) if account.credential else None,
-        source_client_name=client_name,
-        created_at=format_datetime(account.created_at),
-        updated_at=format_datetime(account.updated_at),
-        last_exported_at=format_datetime(account.last_exported_at),
-        recovery_codes=_split_recovery_codes(
-            account.credential.recovery_codes_enc and decrypt_text(account.credential.recovery_codes_enc)
-        )
-        if account.credential
-        else [],
-        remark=account.remark,
-    )
+    return _to_list_item(account, source_client_name=client_name)
 
 
 @router.delete("/{account_id}")
@@ -520,7 +635,7 @@ def delete_github_account(
         action="delete_github_account",
         target_type="github_account",
         target_id=account.id,
-        details={"github_login": account.github_login},
+        details={"email": account.email},
     )
     db.delete(account)
     _sync_related_mail_accounts(db, account=account)
@@ -550,7 +665,7 @@ def get_github_account_credential(
         action="view_github_credential",
         target_type="github_account",
         target_id=account.id,
-        details={"github_login": account.github_login},
+        details={"email": account.email},
     )
     db.commit()
     return GitHubAccountCredentialResponse(

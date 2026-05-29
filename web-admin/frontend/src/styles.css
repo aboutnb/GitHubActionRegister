@@ -858,14 +858,26 @@ body {
 }
 
 .table-toolbar {
-  max-width: min(980px, 68vw);
+  max-width: min(1180px, 72vw);
   justify-content: flex-end;
   row-gap: 8px;
+}
+
+.table-toolbar-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 
 .table-toolbar .ant-input-search,
 .table-toolbar .ant-select {
   max-width: 100%;
+}
+
+.table-toolbar__meta {
+  margin-top: 6px;
+  text-align: right;
 }
 
 .management-table {
@@ -964,7 +976,9 @@ body {
 }
 
 .sensitive-chip {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 104px;
   max-width: 200px;
   padding: 4px 10px;
@@ -979,6 +993,8 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   user-select: none;
+  appearance: none;
+  cursor: pointer;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
   transition:
     background 120ms ease,
@@ -986,6 +1002,16 @@ body {
     color 120ms ease,
     box-shadow 120ms ease,
     transform 120ms ease;
+}
+
+.sensitive-chip:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.sensitive-chip:focus-visible {
+  outline: 2px solid #84adff;
+  outline-offset: 2px;
 }
 
 .sensitive-chip.is-revealed {
@@ -1000,6 +1026,24 @@ body {
   border-color: #75e0a7;
   color: #05603a;
   transform: translateY(-1px);
+}
+
+.health-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.health-config-summary {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+  color: #475467;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .result-panel {

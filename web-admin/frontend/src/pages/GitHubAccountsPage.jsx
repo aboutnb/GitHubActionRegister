@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Button,
   Card,
   Drawer,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Select,
@@ -12,6 +14,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
@@ -23,8 +26,11 @@ import {
   deleteGitHubAccount,
   exportGitHubAccounts,
   fetchGitHubAccounts,
+  fetchGitHubHealthCheckConfig,
   importGitHubAccounts,
+  runGitHubHealthCheck,
   updateGitHubAccount,
+  updateGitHubHealthCheckConfig,
 } from '../services/api';
 import SensitiveValue from '../components/SensitiveValue';
 import { usePersistentState } from '../hooks/usePersistentState';
@@ -46,27 +52,75 @@ const statusOptions = [
   { label: '未知', value: 'unknown' },
 ];
 
+const healthStatusColor = {
+  alive: 'green',
+  not_found: 'default',
+  error: 'red',
+  unknown: 'gold',
+  skipped: 'cyan',
+};
+
+const healthStatusLabel = {
+  alive: '存活',
+  not_found: '404',
+  error: '异常',
+  unknown: '未测活',
+  skipped: '跳过',
+};
+
+const healthStatusOptions = [
+  { label: '存活', value: 'alive' },
+  { label: '404/未找到', value: 'not_found' },
+  { label: '异常', value: 'error' },
+  { label: '未测活', value: 'unknown' },
+];
+
+const cronPresetOptions = [
+  { label: '每半个月（1号/15号 00:00）', value: '0 0 1,15 * *' },
+  { label: '每月 1 号 00:00', value: '0 0 1 * *' },
+  { label: '每月 15 号 00:00', value: '0 0 15 * *' },
+  { label: '自定义', value: 'custom' },
+];
+
+function resolveCronPreset(cronExpression) {
+  const value = String(cronExpression || '').trim();
+  return cronPresetOptions.some((option) => option.value === value) ? value : 'custom';
+}
+
+function deriveGitHubUsername(email) {
+  const value = String(email || '').trim();
+  if (!value) return '';
+  return value.includes('@') ? value.split('@')[0].trim() : value;
+}
+
 function parseGitHubImportLine(line) {
   const raw = String(line || '').trim();
   if (!raw) return null;
   const parts = raw.split('---').map((item) => item.trim());
-  if (parts.length < 3 || !parts[0] || !parts[1]) {
-    throw new Error('导入格式应为：账号---密码---2FA密钥/NO_2FA---绑定邮箱（可选）');
+  if (parts.length !== 3 || !parts[0] || !parts[1]) {
+    throw new Error('导入格式应为：邮箱---密码---2FA密钥/NO_2FA');
   }
   return {
-    github_login: parts[0],
-    github_username: parts[0],
+    email: parts[0],
+    github_username: deriveGitHubUsername(parts[0]),
     github_password: parts[1],
     totp_secret: parts[2] || 'NO_2FA',
-    bind_email: parts[3] || parts[0],
     raw_line: raw,
   };
+}
+
+function parseProxyPoolText(value) {
+  return String(value || '')
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 export default function GitHubAccountsPage() {
   const [filters, setFilters] = usePersistentState('github_accounts_filters', {
     query: '',
     statusFilter: undefined,
+    healthStatusFilter: undefined,
     twoFaFilter: undefined,
     ageBucket: undefined,
     sortBy: undefined,
@@ -77,12 +131,19 @@ export default function GitHubAccountsPage() {
   const [exportMeta, setExportMeta] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [healthConfigOpen, setHealthConfigOpen] = useState(false);
+  const [healthConfigMeta, setHealthConfigMeta] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailRow, setDetailRow] = useState(null);
   const [editingRow, setEditingRow] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [healthRunning, setHealthRunning] = useState(false);
+  const [healthConfigLoading, setHealthConfigLoading] = useState(false);
+  const [healthConfigSaving, setHealthConfigSaving] = useState(false);
+  const [cronMode, setCronMode] = useState('0 0 1,15 * *');
   const query = filters.query;
   const statusFilter = filters.statusFilter;
+  const healthStatusFilter = filters.healthStatusFilter;
   const twoFaFilter = filters.twoFaFilter;
   const ageBucket = filters.ageBucket;
   const sortBy = filters.sortBy;
@@ -91,6 +152,7 @@ export default function GitHubAccountsPage() {
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 });
   const [form] = Form.useForm();
   const [importForm] = Form.useForm();
+  const [healthForm] = Form.useForm();
   const selectedCount = selectedRowKeys.length;
 
   const loadData = async (
@@ -98,6 +160,7 @@ export default function GitHubAccountsPage() {
     pageSize = pagination.pageSize,
     nextQuery = query,
     nextStatus = statusFilter,
+    nextHealthStatus = healthStatusFilter,
     nextTwoFa = twoFaFilter,
     nextAgeBucket = ageBucket,
     nextSortBy = sortBy,
@@ -108,6 +171,7 @@ export default function GitHubAccountsPage() {
       page_size: pageSize,
       q: nextQuery || undefined,
       status: nextStatus || undefined,
+      health_status: nextHealthStatus || undefined,
       two_fa_enabled: nextTwoFa,
       age_bucket: nextAgeBucket || undefined,
       sort_by: nextSortBy || undefined,
@@ -118,8 +182,8 @@ export default function GitHubAccountsPage() {
   };
 
   useEffect(() => {
-    loadData(1, pagination.pageSize, query, statusFilter, twoFaFilter, ageBucket);
-  }, [query, statusFilter, twoFaFilter, ageBucket, sortBy, sortOrder]);
+    loadData(1, pagination.pageSize, query, statusFilter, healthStatusFilter, twoFaFilter, ageBucket, sortBy, sortOrder);
+  }, [query, statusFilter, healthStatusFilter, twoFaFilter, ageBucket, sortBy, sortOrder]);
 
   const openCreate = () => {
     setEditingRow(null);
@@ -131,9 +195,8 @@ export default function GitHubAccountsPage() {
   const openEdit = (row) => {
     setEditingRow(row);
     form.setFieldsValue({
-      github_login: row.github_login,
+      email: row.email,
       github_username: row.github_username,
-      bind_email: row.bind_email,
       status: row.status,
       two_fa_enabled: row.two_fa_enabled,
       remark: row.remark,
@@ -261,10 +324,90 @@ export default function GitHubAccountsPage() {
     message.success(`已导出 ${data.success_count} 条选中账号`);
   };
 
+  const openHealthConfig = async () => {
+    setHealthConfigOpen(true);
+    setHealthConfigLoading(true);
+    try {
+      const { data } = await fetchGitHubHealthCheckConfig();
+      const cronExpression = data.cron_expression || '0 0 1,15 * *';
+      const preset = resolveCronPreset(cronExpression);
+      setHealthConfigMeta(data);
+      setCronMode(preset);
+      healthForm.setFieldsValue({
+        enabled: data.enabled,
+        cron_preset: preset,
+        cron_expression: cronExpression,
+        accounts_per_proxy: data.accounts_per_proxy || 15,
+        timeout_seconds: data.timeout_seconds || 10,
+        proxy_urls_text: (data.proxy_urls || []).join('\n'),
+      });
+    } catch (error) {
+      message.error(error?.response?.data?.detail || '读取测活配置失败');
+    } finally {
+      setHealthConfigLoading(false);
+    }
+  };
+
+  const handleSaveHealthConfig = async (values) => {
+    setHealthConfigSaving(true);
+    try {
+      const cronExpression = values.cron_preset === 'custom' ? values.cron_expression : values.cron_preset;
+      const { data } = await updateGitHubHealthCheckConfig({
+        enabled: Boolean(values.enabled),
+        cron_expression: cronExpression,
+        proxy_urls: parseProxyPoolText(values.proxy_urls_text),
+        accounts_per_proxy: values.accounts_per_proxy,
+        timeout_seconds: values.timeout_seconds,
+      });
+      setHealthConfigMeta(data);
+      message.success(data.enabled ? '测活定时任务已启用' : '测活配置已保存');
+      setHealthConfigOpen(false);
+    } catch (error) {
+      message.error(error?.response?.data?.detail || '保存测活配置失败');
+    } finally {
+      setHealthConfigSaving(false);
+    }
+  };
+
+  const handleRunHealthCheck = async (accountIds) => {
+    if (healthRunning) return;
+    if (accountIds && !accountIds.length) {
+      message.warning('请先选择 GitHub 账号');
+      return;
+    }
+    setHealthRunning(true);
+    try {
+      const { data } = await runGitHubHealthCheck({
+        account_ids: accountIds?.length ? accountIds : undefined,
+        use_saved_config: true,
+      });
+      const skippedText = data.skipped_count ? `，跳过 ${data.skipped_count} 条（代理池容量不足）` : '';
+      message.success(
+        `测活完成：已测 ${data.checked_count} 条，存活 ${data.alive_count} 条，404 ${data.not_found_count} 条，异常 ${data.error_count} 条${skippedText}`,
+      );
+      loadData(
+        pagination.current,
+        pagination.pageSize,
+        query,
+        statusFilter,
+        healthStatusFilter,
+        twoFaFilter,
+        ageBucket,
+        sortBy,
+        sortOrder,
+      );
+    } catch (error) {
+      message.error(error?.response?.data?.detail || '账号测活失败');
+    } finally {
+      setHealthRunning(false);
+    }
+  };
+
   const resetFilters = () => {
     setFilters({
       query: '',
       statusFilter: undefined,
+      healthStatusFilter: undefined,
       twoFaFilter: undefined,
       ageBucket: undefined,
       sortBy: undefined,
@@ -277,10 +420,9 @@ export default function GitHubAccountsPage() {
   };
 
   const buildExportLine = (row) => [
-    row.github_login || '',
+    row.email || '',
     row.github_password || '',
     row.totp_secret || 'NO_2FA',
-    row.bind_email || '',
   ].join('---');
 
   const handleCopyExportRow = async (row) => {
@@ -321,6 +463,7 @@ export default function GitHubAccountsPage() {
       nextPagination.pageSize,
       query,
       statusFilter,
+      healthStatusFilter,
       twoFaFilter,
       ageBucket,
       nextSortBy,
@@ -340,12 +483,12 @@ export default function GitHubAccountsPage() {
         render: (value) => value || '-',
       },
       {
-        title: '账号',
-        dataIndex: 'github_login',
+        title: '邮箱',
+        dataIndex: 'email',
         width: 240,
         ellipsis: true,
         sorter: true,
-        sortOrder: sortBy === 'github_login' ? sortOrder : null,
+        sortOrder: sortBy === 'email' ? sortOrder : null,
         render: (value) => value || '-',
       },
       {
@@ -357,21 +500,40 @@ export default function GitHubAccountsPage() {
         render: (value) => <Tag color={value ? 'green' : 'default'}>{value ? '已启用' : '未启用'}</Tag>,
       },
       {
-        title: '绑定邮箱',
-        dataIndex: 'bind_email',
-        width: 240,
-        ellipsis: true,
-        sorter: true,
-        sortOrder: sortBy === 'bind_email' ? sortOrder : null,
-        render: (value) => value || '-',
-      },
-      {
         title: '状态',
         dataIndex: 'status',
         width: 110,
         sorter: true,
         sortOrder: sortBy === 'status' ? sortOrder : null,
         render: (value) => <Tag color={statusColor[value] || 'default'}>{value}</Tag>,
+      },
+      {
+        title: '测活',
+        dataIndex: 'health_status',
+        width: 120,
+        sorter: true,
+        sortOrder: sortBy === 'health_status' ? sortOrder : null,
+        render: (value, row) => (
+          <Tooltip
+            title={
+              row.health_error
+                ? `HTTP ${row.health_http_status || '-'} · ${row.health_error}`
+                : row.health_http_status
+                  ? `HTTP ${row.health_http_status}`
+                  : '尚未测活'
+            }
+          >
+            <Tag color={healthStatusColor[value] || 'default'}>{healthStatusLabel[value] || value || '-'}</Tag>
+          </Tooltip>
+        ),
+      },
+      {
+        title: '最近测活',
+        dataIndex: 'health_checked_at',
+        width: 170,
+        sorter: true,
+        sortOrder: sortBy === 'health_checked_at' ? sortOrder : null,
+        render: (value) => value || '-',
       },
       {
         title: '密码',
@@ -405,7 +567,7 @@ export default function GitHubAccountsPage() {
       {
         title: '操作',
         key: 'actions',
-        width: 180,
+        width: 220,
         fixed: 'right',
         align: 'right',
         className: 'actions-column',
@@ -413,6 +575,9 @@ export default function GitHubAccountsPage() {
           <Space className="table-action-bar">
             <Button type="link" onClick={() => openDetail(row)}>
               详情
+            </Button>
+            <Button type="link" onClick={() => handleRunHealthCheck([row.id])} loading={healthRunning}>
+              测活
             </Button>
             <Button type="link" onClick={() => openEdit(row)}>
               编辑
@@ -426,7 +591,18 @@ export default function GitHubAccountsPage() {
         ),
       },
     ],
-    [sortBy, sortOrder],
+    [
+      query,
+      statusFilter,
+      healthStatusFilter,
+      twoFaFilter,
+      ageBucket,
+      pagination.current,
+      pagination.pageSize,
+      sortBy,
+      sortOrder,
+      healthRunning,
+    ],
   );
 
   const exportColumns = useMemo(
@@ -483,61 +659,89 @@ export default function GitHubAccountsPage() {
       <Card
         className="table-card"
         extra={
-          <Space className="table-toolbar" wrap>
-            <Input.Search
-              allowClear
-              placeholder="搜索用户名 / 账号 / 备注"
-              style={{ width: 300 }}
-              value={query}
-              onChange={(event) =>
-                setFilters((prev) => ({ ...prev, query: event.target.value }))
-              }
-              onSearch={(value) => setFilters((prev) => ({ ...prev, query: value }))}
-            />
-            <Select
-              allowClear
-              placeholder="状态筛选"
-              style={{ width: 150 }}
-              options={statusOptions}
-              value={statusFilter}
-              onChange={(value) => setFilters((prev) => ({ ...prev, statusFilter: value }))}
-            />
-            <Select
-              allowClear
-              placeholder="2FA 筛选"
-              style={{ width: 140 }}
-              options={[
-                { label: '已启用 2FA', value: true },
-                { label: '未启用 2FA', value: false },
-              ]}
-              value={twoFaFilter}
-              onChange={(value) => setFilters((prev) => ({ ...prev, twoFaFilter: value }))}
-            />
-            <Select
-              allowClear
-              placeholder="时间段筛选"
-              style={{ width: 140 }}
-              options={[
-                { label: '新号', value: 'new' },
-                { label: '7D+', value: '7d_plus' },
-                { label: '30D+', value: '30d_plus' },
-              ]}
-              value={ageBucket}
-              onChange={(value) => setFilters((prev) => ({ ...prev, ageBucket: value }))}
-            />
-            <Button onClick={resetFilters}>重置筛选</Button>
-            <Button onClick={() => setImportOpen(true)}>批量导入</Button>
-            <Button onClick={handleExport}>导出可用账号</Button>
-            <Button type="primary" onClick={openCreate}>
-              新增 GitHub 账号
-            </Button>
-          </Space>
+          <div className="table-toolbar-stack">
+            <Space className="table-toolbar" wrap>
+              <Input.Search
+                allowClear
+                placeholder="搜索邮箱 / 用户名 / 备注"
+                style={{ width: 300 }}
+                value={query}
+                onChange={(event) =>
+                  setFilters((prev) => ({ ...prev, query: event.target.value }))
+                }
+                onSearch={(value) => setFilters((prev) => ({ ...prev, query: value }))}
+              />
+              <Select
+                allowClear
+                placeholder="状态筛选"
+                style={{ width: 150 }}
+                options={statusOptions}
+                value={statusFilter}
+                onChange={(value) => setFilters((prev) => ({ ...prev, statusFilter: value }))}
+              />
+              <Select
+                allowClear
+                placeholder="测活状态"
+                style={{ width: 150 }}
+                options={healthStatusOptions}
+                value={healthStatusFilter}
+                onChange={(value) => setFilters((prev) => ({ ...prev, healthStatusFilter: value }))}
+              />
+              <Select
+                allowClear
+                placeholder="2FA 筛选"
+                style={{ width: 140 }}
+                options={[
+                  { label: '已启用 2FA', value: true },
+                  { label: '未启用 2FA', value: false },
+                ]}
+                value={twoFaFilter}
+                onChange={(value) => setFilters((prev) => ({ ...prev, twoFaFilter: value }))}
+              />
+              <Select
+                allowClear
+                placeholder="时间段筛选"
+                style={{ width: 140 }}
+                options={[
+                  { label: '新号', value: 'new' },
+                  { label: '7D+', value: '7d_plus' },
+                  { label: '30D+', value: '30d_plus' },
+                ]}
+                value={ageBucket}
+                onChange={(value) => setFilters((prev) => ({ ...prev, ageBucket: value }))}
+              />
+              <Button onClick={resetFilters}>重置筛选</Button>
+              <Button onClick={openHealthConfig} loading={healthConfigLoading}>
+                测活配置
+              </Button>
+              <Button onClick={() => handleRunHealthCheck()} loading={healthRunning}>
+                测活全部
+              </Button>
+              <Button onClick={() => setImportOpen(true)}>批量导入</Button>
+              <Button onClick={handleExport}>导出可用账号</Button>
+              <Button type="primary" onClick={openCreate}>
+                新增 GitHub 账号
+              </Button>
+            </Space>
+            {healthConfigMeta ? (
+              <div className="table-toolbar__meta">
+                <Typography.Text type="secondary">
+                  测活定时：{healthConfigMeta.enabled ? '已启用' : '已关闭'} · {healthConfigMeta.cron_expression}
+                  {' · '}
+                  每个代理 {healthConfigMeta.accounts_per_proxy} 条 · 超时 {healthConfigMeta.timeout_seconds}s
+                </Typography.Text>
+              </div>
+            ) : null}
+          </div>
         }
       >
         {selectedCount > 0 && (
           <div className="selection-toolbar">
             <Space size={12}>
               <span className="selection-toolbar__count">已选 {selectedCount} 条 GitHub 账号</span>
+              <Button size="small" onClick={() => handleRunHealthCheck(selectedRowKeys)} loading={healthRunning}>
+                测活选中
+              </Button>
               <Popconfirm
                 title={`确认将选中的 ${selectedCount} 条 GitHub 账号标记为可用吗？`}
                 description="状态会更新为 active。"
@@ -596,7 +800,7 @@ export default function GitHubAccountsPage() {
           size="middle"
           rowKey="id"
           dataSource={rows}
-          scroll={{ x: 1880 }}
+          scroll={{ x: 1940 }}
           sticky
           rowSelection={{
             selectedRowKeys,
@@ -625,7 +829,7 @@ export default function GitHubAccountsPage() {
                 共 {exportRows.length} 条
               </Typography.Text>
               <Button size="small" onClick={handleCopyExportAll}>
-                复制全部（账号---密码---2FA）
+                复制全部（邮箱---密码---2FA）
               </Button>
               <Button size="small" onClick={handleDownloadExport}>
                 下载 TXT
@@ -644,7 +848,7 @@ export default function GitHubAccountsPage() {
         >
           <Table
             className="management-table"
-            rowKey={(row) => `${row.github_login}-${row.github_username || 'no-user'}`}
+            rowKey={(row) => `${row.email}-${row.github_username || 'no-user'}`}
             size="small"
             pagination={false}
             scroll={{ x: 1240 }}
@@ -654,6 +858,102 @@ export default function GitHubAccountsPage() {
           />
         </Card>
       )}
+
+      <Drawer
+        title="GitHub 账号测活配置"
+        width={560}
+        open={healthConfigOpen}
+        onClose={() => setHealthConfigOpen(false)}
+        destroyOnClose
+      >
+        <div className="health-config-panel">
+          <Alert
+            type="info"
+            showIcon
+            message="测活规则"
+            description="调用 GitHub users/{用户名} API：正常返回用户 JSON 且包含 login 记为存活；404 记为未找到；其他网络或 HTTP 异常记为异常。代理池按顺序分配，每个代理本轮最多测 1-20 个账号。"
+          />
+          {healthConfigMeta ? (
+            <div className="health-config-summary">
+              <span>上次运行：{healthConfigMeta.last_run_at || '-'}</span>
+              <span>下次运行：{healthConfigMeta.next_run_at || '-'}</span>
+              <span>最近批次：{healthConfigMeta.last_batch_no || '-'}</span>
+            </div>
+          ) : null}
+          <Form
+            layout="vertical"
+            form={healthForm}
+            onFinish={handleSaveHealthConfig}
+            disabled={healthConfigLoading}
+          >
+            <Form.Item label="启用定时测活" name="enabled" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              label="测活频率"
+              name="cron_preset"
+              rules={[{ required: true, message: '请选择测活频率' }]}
+                extra="为避免浪费代理资源，定时测活只允许半个月或更低频率。需要固定日期时可选择“自定义”。"
+            >
+              <Select
+                options={cronPresetOptions}
+                onChange={(value) => {
+                  setCronMode(value);
+                  if (value !== 'custom') {
+                    healthForm.setFieldsValue({ cron_expression: value });
+                  }
+                }}
+              />
+            </Form.Item>
+            {cronMode === 'custom' ? (
+              <Form.Item
+                label="自定义 cron 表达式"
+                name="cron_expression"
+                rules={[{ required: true, message: '请输入 5 段 cron 表达式' }]}
+                extra="按服务端本地时间执行，间隔不能小于半个月。示例：0 0 1 * * 表示每月 1 号 00:00。"
+              >
+                <Input placeholder="0 0 1 * *" />
+              </Form.Item>
+            ) : (
+              <Form.Item
+                label="cron 表达式"
+                name="cron_expression"
+                extra="系统会把选择的频率保存为标准 5 段 cron 表达式。"
+              >
+                <Input disabled />
+              </Form.Item>
+            )}
+            <Form.Item
+              label="每个代理最多测活账号数"
+              name="accounts_per_proxy"
+              rules={[{ required: true, message: '请输入每个代理的账号数' }]}
+              extra="建议 15-20，后端会限制在 1-20。代理池容量不足时，剩余账号本轮跳过。"
+            >
+              <InputNumber min={1} max={20} style={{ width: 180 }} />
+            </Form.Item>
+            <Form.Item
+              label="请求超时（秒）"
+              name="timeout_seconds"
+              rules={[{ required: true, message: '请输入请求超时时间' }]}
+            >
+              <InputNumber min={2} max={60} style={{ width: 180 }} />
+            </Form.Item>
+            <Form.Item
+              label="代理池"
+              name="proxy_urls_text"
+              extra="每行一个代理，支持 ip:port、user:pass@ip:port 或完整 http/socks URL；留空则直连 GitHub。"
+            >
+              <Input.TextArea rows={8} placeholder={`127.0.0.1:7890\nhttp://user:pass@1.2.3.4:8000`} />
+            </Form.Item>
+            <Space>
+              <Button type="primary" htmlType="submit" loading={healthConfigSaving}>
+                保存配置
+              </Button>
+              <Button onClick={() => setHealthConfigOpen(false)}>取消</Button>
+            </Space>
+          </Form>
+        </div>
+      </Drawer>
 
       <Drawer
         title="批量导入 GitHub 账号"
@@ -667,11 +967,11 @@ export default function GitHubAccountsPage() {
             label="多行导入内容"
             name="lines"
             rules={[{ required: true, message: '请输入多行导入内容' }]}
-            extra="每行一条，格式：账号---密码---2FA密钥---绑定邮箱。绑定邮箱可选，未填写时默认回填当前账号。未开启 2FA 的账号请填写 NO_2FA。"
+            extra="每行一条，格式：邮箱---密码---2FA密钥。未开启 2FA 的账号请填写 NO_2FA。用户名会自动取邮箱 @ 前缀。"
           >
             <Input.TextArea
               rows={14}
-              placeholder={`JeanPainter961956@outlook.com---MZVcd673@Git2026---3KFJPTQ2WSZAOUP6---JeanPainter961956@outlook.com\nWilliamWatson148@outlook.com---TLFovyw60@Git2026---NO_2FA---WilliamWatson148@outlook.com`}
+              placeholder={`JeanPainter961956@outlook.com---MZVcd673@Git2026---3KFJPTQ2WSZAOUP6\nWilliamWatson148@outlook.com---TLFovyw60@Git2026---NO_2FA`}
             />
           </Form.Item>
           <Space>
@@ -693,21 +993,14 @@ export default function GitHubAccountsPage() {
       >
         <Form layout="vertical" form={form} onFinish={handleSave}>
           <Form.Item
-            label="账号"
-            name="github_login"
-            rules={[{ required: true, message: '请输入账号' }]}
-          >
-            <Input />
-          </Form.Item>
-          <Form.Item label="用户名" name="github_username">
-            <Input />
-          </Form.Item>
-          <Form.Item
-            label="绑定邮箱"
-            name="bind_email"
-            extra="填写后会自动同步邮箱资产状态；留空时不会建立显式绑定。"
+            label="邮箱"
+            name="email"
+            rules={[{ required: true, message: '请输入邮箱' }]}
           >
             <Input placeholder="例如：JeanPainter961956@outlook.com" />
+          </Form.Item>
+          <Form.Item label="用户名" name="github_username">
+            <Input placeholder="留空时自动取邮箱 @ 前缀" />
           </Form.Item>
           <Form.Item
             label={editingRow ? '新密码' : '密码'}
@@ -757,16 +1050,12 @@ export default function GitHubAccountsPage() {
         {detailRow ? (
           <div className="detail-panel">
             <div className="detail-panel__item">
-              <div className="detail-panel__label">账号</div>
-              <div className="detail-panel__value">{detailRow.github_login}</div>
+              <div className="detail-panel__label">邮箱</div>
+              <div className="detail-panel__value">{detailRow.email}</div>
             </div>
             <div className="detail-panel__item">
               <div className="detail-panel__label">用户名</div>
               <div className="detail-panel__value">{detailRow.github_username || '-'}</div>
-            </div>
-            <div className="detail-panel__item">
-              <div className="detail-panel__label">绑定邮箱</div>
-              <div className="detail-panel__value">{detailRow.bind_email || '-'}</div>
             </div>
             <div className="detail-panel__item">
               <div className="detail-panel__label">密码</div>
@@ -781,6 +1070,28 @@ export default function GitHubAccountsPage() {
             <div className="detail-panel__item">
               <div className="detail-panel__label">状态</div>
               <div className="detail-panel__value">{detailRow.status || '-'}</div>
+            </div>
+            <div className="detail-panel__item">
+              <div className="detail-panel__label">测活状态</div>
+              <div className="detail-panel__value">
+                <Tag color={healthStatusColor[detailRow.health_status] || 'default'}>
+                  {healthStatusLabel[detailRow.health_status] || detailRow.health_status || '-'}
+                </Tag>
+              </div>
+            </div>
+            <div className="detail-panel__item">
+              <div className="detail-panel__label">最近测活</div>
+              <div className="detail-panel__value">{detailRow.health_checked_at || '-'}</div>
+            </div>
+            <div className="detail-panel__item detail-panel__item--full">
+              <div className="detail-panel__label">测活错误</div>
+              <div className="detail-panel__value">
+                {detailRow.health_error
+                  ? `HTTP ${detailRow.health_http_status || '-'} · ${detailRow.health_error}`
+                  : detailRow.health_http_status
+                    ? `HTTP ${detailRow.health_http_status}`
+                    : '-'}
+              </div>
             </div>
             <div className="detail-panel__item">
               <div className="detail-panel__label">2FA</div>
