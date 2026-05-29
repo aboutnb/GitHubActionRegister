@@ -137,8 +137,6 @@ CREATE TABLE IF NOT EXISTS asset_center.audit_logs (
 CREATE INDEX IF NOT EXISTS idx_mail_accounts_status ON asset_center.mail_accounts(status);
 CREATE INDEX IF NOT EXISTS idx_mail_accounts_lease_expires_at ON asset_center.mail_accounts(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_github_accounts_status ON asset_center.github_accounts(status);
-CREATE INDEX IF NOT EXISTS idx_github_accounts_health_status ON asset_center.github_accounts(health_status);
-CREATE INDEX IF NOT EXISTS idx_github_accounts_health_checked_at ON asset_center.github_accounts(health_checked_at);
 CREATE INDEX IF NOT EXISTS idx_github_accounts_bind_mail ON asset_center.github_accounts(bind_mail_account_id);
 CREATE INDEX IF NOT EXISTS idx_sync_logs_client_created ON asset_center.sync_logs(client_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON asset_center.audit_logs(target_type, target_id, created_at DESC);
