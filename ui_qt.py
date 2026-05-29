@@ -132,13 +132,18 @@ class ProxySettingsDialog(QtWidgets.QDialog):
         self.ed_web_admin_client_token.setPlaceholderText("桌面客户端 Token")
         remote_layout.addRow("客户端 Token：", self.ed_web_admin_client_token)
 
-        self.cb_push_github_result = QtWidgets.QCheckBox("注册成功后自动回传 GitHub 账号")
+        self.cb_push_github_result = QtWidgets.QCheckBox("注册结果自动同步管理中心")
         self.cb_push_github_result.setChecked(bool(cfg.get("pushGithubResult", False)))
         remote_layout.addRow("", self.cb_push_github_result)
 
         self.cb_push_github_without_2fa = QtWidgets.QCheckBox("未开启 2FA 也回传（只要注册成功）")
         self.cb_push_github_without_2fa.setChecked(bool(cfg.get("pushGithubWithout2fa", True)))
         remote_layout.addRow("", self.cb_push_github_without_2fa)
+
+        sync_tip = QtWidgets.QLabel("开启后：本地导入账号注册成功会回传 GitHub 账号库，注册失败会按导入时选择的官方/小水滴类型回传邮箱库。")
+        sync_tip.setWordWrap(True)
+        sync_tip.setStyleSheet("color: #6b7280;")
+        remote_layout.addRow("", sync_tip)
 
         layout.addWidget(remote_group)
 

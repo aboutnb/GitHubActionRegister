@@ -209,3 +209,41 @@ def push_github_result(
         timeout=REQUEST_TIMEOUT,
     )
     return _parse_json_response(resp)
+
+
+def push_mail_account(
+    *,
+    base_url: str,
+    api_token: str,
+    email: str,
+    password: str,
+    receive_mode: str,
+    raw_line: str | None = None,
+    client_id: str | None = None,
+    access_token: str | None = None,
+    remark: str | None = None,
+) -> dict[str, Any]:
+    base = _normalize_base_url(base_url)
+    headers = _build_client_headers(api_token)
+    batch_name = f"desktop-mail-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    payload = {
+        "batch_name": batch_name,
+        "items": [
+            {
+                "email": email,
+                "password": password,
+                "receive_mode": str(receive_mode or "").strip().lower() or "xiaoshuidi",
+                "raw_line": raw_line,
+                "client_id": client_id,
+                "access_token": access_token,
+                "remark": remark,
+            }
+        ],
+    }
+    resp = requests.post(
+        f"{base}/client/mail-accounts/push",
+        headers=headers,
+        json=payload,
+        timeout=REQUEST_TIMEOUT,
+    )
+    return _parse_json_response(resp)

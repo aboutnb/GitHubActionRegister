@@ -17,6 +17,27 @@ class PullMailResponse(BaseModel):
     items: list[PullMailItem]
 
 
+class PushMailItem(BaseModel):
+    email: str
+    password: str
+    receive_mode: str
+    raw_line: str | None = None
+    client_id: str | None = None
+    access_token: str | None = None
+    remark: str | None = None
+
+
+class PushMailRequest(BaseModel):
+    batch_name: str
+    items: list[PushMailItem]
+
+
+class PushMailResponse(BaseModel):
+    batch_no: str
+    success_count: int
+    duplicate_count: int
+
+
 class PushGitHubItem(BaseModel):
     github_login: str
     github_username: str | None = None

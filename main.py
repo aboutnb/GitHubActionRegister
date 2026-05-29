@@ -57,6 +57,7 @@ from web_admin_client import (
     get_remote_verification_info,
     pull_remote_mail_accounts,
     push_github_result,
+    push_mail_account,
 )
 
 # ---------------------------------------------------------------------------
@@ -497,6 +498,7 @@ def _run_single_account(
     final_ui_status = STATUS_FAILED
     export_failed_plain = False
     raw_import_line = str(account.get("raw") or "")
+    mail_pushed = False
 
     try:
         if cancel():
@@ -577,6 +579,8 @@ def _run_single_account(
                 _append_failed_record(
                     email, "邮箱已被注册", mode_label=mode_label, stage="注册提交"
                 )
+                _try_push_mail_account(account=account, log=log, reason="邮箱已被注册")
+                mail_pushed = True
                 final_ui_status = STATUS_REGISTERED
                 on_status(final_ui_status)
                 # 已注册账号不可重试，不写入纯净失败列表
@@ -585,6 +589,8 @@ def _run_single_account(
                 _append_failed_record(
                     email, "用户名已被占用", mode_label=mode_label, stage="注册提交"
                 )
+                _try_push_mail_account(account=account, log=log, reason="用户名已被占用")
+                mail_pushed = True
                 final_ui_status = STATUS_USERNAME_TAKEN
                 on_status(final_ui_status)
                 export_failed_plain = True
@@ -596,6 +602,8 @@ def _run_single_account(
                     mode_label=mode_label,
                     stage="注册提交",
                 )
+                _try_push_mail_account(account=account, log=log, reason="GitHub无法创建账号（服务拒绝）")
+                mail_pushed = True
                 final_ui_status = STATUS_SERVICE_REFUSED
                 on_status(final_ui_status)
                 export_failed_plain = True
@@ -604,6 +612,8 @@ def _run_single_account(
                 _append_failed_record(
                     email, f"表单校验失败: {e}", mode_label=mode_label, stage="注册提交"
                 )
+                _try_push_mail_account(account=account, log=log, reason=f"表单校验失败: {e}")
+                mail_pushed = True
                 final_ui_status = STATUS_FAILED
                 on_status(final_ui_status)
                 export_failed_plain = True
@@ -635,6 +645,8 @@ def _run_single_account(
                     mode_label=mode_label,
                     stage="人机验证",
                 )
+                _try_push_mail_account(account=account, log=log, reason="GitHub无法创建账号（服务拒绝）")
+                mail_pushed = True
                 final_ui_status = STATUS_SERVICE_REFUSED
                 on_status(final_ui_status)
                 export_failed_plain = True
@@ -765,6 +777,9 @@ def _run_single_account(
         elif "CDP" in err_s or "浏览器" in err_s or "BitBrowser" in err_s:
             stage_guess = "浏览器"
         _append_failed_record(email, err_s, mode_label=mode_label, stage=stage_guess)
+        if not mail_pushed:
+            _try_push_mail_account(account=account, log=log, reason=err_s)
+            mail_pushed = True
         final_ui_status = STATUS_FAILED
         on_status(final_ui_status)
         result_status = "failed"
@@ -818,6 +833,49 @@ def _open_output_ui() -> None:
         _open_path_default_app(OUTPUT_FILE)
     else:
         print("提示：尚无导出文件")
+
+
+def _should_push_local_mail_account(account: dict[str, Any]) -> bool:
+    source = str(account.get("source") or "local").strip().lower()
+    email = str(account.get("email") or "").strip()
+    password = str(account.get("password") or "").strip()
+    receive_mode = str(account.get("receive_mode") or "xiaoshuidi").strip().lower() or "xiaoshuidi"
+    return source == "local" and bool(email and password) and receive_mode in {"official", "xiaoshuidi"}
+
+
+def _try_push_mail_account(
+    *,
+    account: dict[str, Any],
+    log: Callable[[str], None],
+    reason: str,
+) -> None:
+    if not _should_push_local_mail_account(account):
+        return
+    cfg = get_app_config()
+    if not cfg.get("pushGithubResult"):
+        return
+    base_url = str(cfg.get("webAdminBaseUrl") or "").strip()
+    api_token = str(cfg.get("webAdminClientToken") or "").strip()
+    if not base_url or not api_token:
+        log("未配置客户端 API 地址或 Token，跳过回传邮箱库")
+        return
+    try:
+        receive_mode = str(account.get("receive_mode") or "xiaoshuidi").strip().lower() or "xiaoshuidi"
+        push_mail_account(
+            base_url=base_url,
+            api_token=api_token,
+            email=str(account.get("email") or "").strip(),
+            password=str(account.get("password") or "").strip(),
+            receive_mode=receive_mode,
+            raw_line=str(account.get("raw") or "").strip() or None,
+            client_id=str(account.get("client_id") or "").strip() or None,
+            access_token=str(account.get("access_token") or "").strip() or None,
+            remark=reason,
+        )
+        mode_label = "官方" if receive_mode == "official" else "小水滴"
+        log(f"已回传邮箱到邮箱库（{mode_label}，原因: {reason}）")
+    except Exception as exc:
+        log(f"回传邮箱库失败: {exc}")
 
 
 def _try_push_github_result(

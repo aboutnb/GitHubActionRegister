@@ -17,10 +17,12 @@ from app.schemas.client import (
     PullMailResponse,
     PushGitHubRequest,
     PushGitHubResponse,
+    PushMailRequest,
+    PushMailResponse,
 )
 from app.schemas.mail import SingleMailInfoResponse
 from app.services.mail_fetch import fetch_latest_mail_info
-from app.services.sync import pull_mail_accounts, push_github_accounts
+from app.services.sync import pull_mail_accounts, push_github_accounts, push_mail_accounts
 
 router = APIRouter(prefix="/client", tags=["client"])
 
@@ -59,6 +61,30 @@ def push_github(
     )
     db.commit()
     return PushGitHubResponse(
+        batch_no=batch_no,
+        success_count=success_count,
+        duplicate_count=duplicate_count,
+    )
+
+
+@router.post("/mail-accounts/push", response_model=PushMailResponse)
+def push_mail(
+    payload: PushMailRequest,
+    request: Request,
+    client: DesktopClient = Depends(get_current_client),
+    db: Session = Depends(get_db),
+) -> PushMailResponse:
+    client.last_seen_at = datetime.now(timezone.utc)
+    if request.client:
+        client.last_ip = request.client.host
+    batch_no, success_count, duplicate_count = push_mail_accounts(
+        db,
+        client=client,
+        batch_name=payload.batch_name,
+        items=payload.items,
+    )
+    db.commit()
+    return PushMailResponse(
         batch_no=batch_no,
         success_count=success_count,
         duplicate_count=duplicate_count,

@@ -14,8 +14,9 @@ from app.models.mail_account import MailAccount
 from app.models.mail_credential import MailCredential
 from app.models.sync_batch import SyncBatch
 from app.models.sync_log import SyncLog
-from app.schemas.client import PullMailItem, PushGitHubItem
+from app.schemas.client import PullMailItem, PushGitHubItem, PushMailItem
 from app.services.account_linking import (
+    find_mail_account_by_email,
     reconcile_mail_account_status,
     sync_github_account_binding,
     sync_mail_status_from_github_refs,
@@ -178,6 +179,92 @@ def push_github_accounts(
             success_count=success_count,
             failed_count=len(items) - success_count - duplicate_count,
             message=f"Pushed {success_count} github accounts from {batch_name}",
+        )
+    )
+    return batch.batch_no, success_count, duplicate_count
+
+
+def push_mail_accounts(
+    db: Session,
+    client: DesktopClient,
+    batch_name: str,
+    items: list[PushMailItem],
+) -> tuple[str, int, int]:
+    request_id = uuid4().hex
+    batch = SyncBatch(
+        batch_no=f"MAIL{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        batch_type="mail_push",
+        client_id=client.id,
+        source="desktop",
+        total_count=len(items),
+        success_count=0,
+        duplicate_count=0,
+    )
+    db.add(batch)
+    db.flush()
+
+    success_count = 0
+    duplicate_count = 0
+    seen_emails: set[str] = set()
+    for item in items:
+        normalized_email = str(item.email or "").strip().casefold()
+        normalized_mode = str(item.receive_mode or "").strip().lower()
+        if not normalized_email:
+            continue
+        if normalized_mode not in {"official", "xiaoshuidi"}:
+            continue
+        if normalized_email in seen_emails:
+            duplicate_count += 1
+            continue
+        seen_emails.add(normalized_email)
+
+        exists = find_mail_account_by_email(db, item.email)
+        if exists:
+            duplicate_count += 1
+            continue
+
+        account = MailAccount(
+            email=item.email.strip(),
+            status="idle",
+            remark=item.remark,
+        )
+        db.add(account)
+        db.flush()
+
+        db.add(
+            MailCredential(
+                mail_account_id=account.id,
+                password_enc=encrypt_text(item.password),
+                receive_mode=normalized_mode,
+                client_id=item.client_id,
+                access_token=item.access_token,
+                raw_line=item.raw_line,
+            )
+        )
+        reconcile_mail_account_status(db, account)
+
+        write_audit_log(
+            db=db,
+            operator_type="desktop_client",
+            operator_id=client.id,
+            action="push_mail_account",
+            target_type="mail_account",
+            target_id=account.id,
+            details={"email": account.email, "batch_name": batch_name, "receive_mode": normalized_mode},
+        )
+        success_count += 1
+
+    batch.success_count = success_count
+    batch.duplicate_count = duplicate_count
+    db.add(
+        SyncLog(
+            client_id=client.id,
+            action="push_mail",
+            request_id=request_id,
+            payload_count=len(items),
+            success_count=success_count,
+            failed_count=len(items) - success_count - duplicate_count,
+            message=f"Pushed {success_count} mail accounts from {batch_name}",
         )
     )
     return batch.batch_no, success_count, duplicate_count
